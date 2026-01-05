@@ -1579,6 +1579,8 @@ def scan():
             'modules': {name: mod.to_dict() for name, mod in analyzer.modules.items()},
             'statistics': analyzer.get_statistics()
         })
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 
 @app.route('/api/upload', methods=['POST'])
