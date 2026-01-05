@@ -173,3 +173,45 @@
 **状态标签：** ✅完成
 
 ---
+
+## 项目优化与 GitHub/Vercel 部署
+
+**时间戳：** 2026-01-05 15:30
+
+**对话标题：** 优化项目结构并部署到 GitHub 和 Vercel
+
+**用户需求：** 
+检查整个项目，优化结构，去除非必要内容减少空间占用，便于后期维护，提交到 GitHub 并部署到 Vercel。
+
+**解决方案：**
+
+### 1. 项目清理
+- 删除 `lib/` 目录（748KB，已使用 CDN）
+- 删除 `odoo-test/odoo-addons/`（493MB Odoo 内置模块）
+- 删除 `odoo_depends.egg-info/` 构建产物
+- 删除 `odoo-test/*.html` 测试生成文件
+- **空间优化: 493MB → 296KB**
+
+### 2. 新增配置文件
+- `.gitignore` - Git 忽略规则
+- `vercel.json` - Vercel 部署配置
+- `api/index.py` - Vercel Serverless 入口
+
+### 3. GitHub 仓库
+- 仓库地址: https://github.com/Albertsun6/odoo-depends
+- 分支: main
+
+### 4. Vercel 部署
+- 已配置 `vercel.json`
+- 需要用户通过 Vercel Dashboard 或 CLI 完成部署
+
+**代码改动：**
+- 新增 `.gitignore`
+- 新增 `vercel.json`
+- 新增 `api/index.py`
+- 更新 `README.md`
+- 更新 `run.py`
+
+**状态标签：** ✅完成
+
+---
