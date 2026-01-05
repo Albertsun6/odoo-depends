@@ -1,0 +1,13 @@
+# Odoo Module Dependency Analyzer
+# Core dependencies
+flask>=3.0.0
+networkx>=3.2
+graphviz>=0.20
+click>=8.1.0
+
+# For visualization
+pyvis>=0.3.2
+
+# Development
+black>=24.0.0
+flake8>=7.0.0

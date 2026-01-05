@@ -1,0 +1,1744 @@
+"""
+Flask Web应用 - 提供Odoo依赖分析的完整可视化界面
+"""
+
+import os
+import json
+import tempfile
+from pathlib import Path
+from flask import Flask, render_template_string, request, jsonify, send_file
+
+from .analyzer import OdooModuleAnalyzer
+from .visualizer import DependencyVisualizer
+from .upgrade_analyzer import UpgradeAnalyzer, ModelAnalyzer
+
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'odoo-depends-analyzer-secret-key'
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max
+
+# 全局分析器实例
+analyzer = None
+visualizer = None
+upgrade_analyzer = UpgradeAnalyzer()
+
+
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Odoo 模块依赖分析器</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" />
+    <style>
+        :root {
+            --bg-primary: #0f0f1a;
+            --bg-secondary: #1a1a2e;
+            --bg-tertiary: #16213e;
+            --bg-card: rgba(26, 26, 46, 0.9);
+            --accent-red: #e74c3c;
+            --accent-blue: #3498db;
+            --accent-green: #2ecc71;
+            --accent-orange: #f39c12;
+            --accent-purple: #9b59b6;
+            --accent-cyan: #00d4ff;
+            --text-primary: #ffffff;
+            --text-secondary: rgba(255, 255, 255, 0.7);
+            --border-color: rgba(255, 255, 255, 0.1);
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Noto Sans SC', 'JetBrains Mono', sans-serif;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 50%, var(--bg-tertiary) 100%);
+            min-height: 100vh;
+            color: var(--text-primary);
+        }
+        
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: 
+                radial-gradient(circle at 20% 80%, rgba(231, 76, 60, 0.08) 0%, transparent 50%),
+                radial-gradient(circle at 80% 20%, rgba(52, 152, 219, 0.08) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        /* 侧边栏 */
+        .sidebar {
+            position: fixed;
+            left: 0; top: 0;
+            width: 280px;
+            height: 100vh;
+            background: var(--bg-card);
+            border-right: 1px solid var(--border-color);
+            padding: 20px;
+            overflow-y: auto;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+        
+        .logo {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-red), var(--accent-cyan));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        
+        .nav-section {
+            margin-bottom: 25px;
+        }
+        
+        .nav-section-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+            letter-spacing: 1px;
+        }
+        
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 15px;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 5px;
+            font-size: 0.95rem;
+        }
+        
+        .nav-item:hover {
+            background: rgba(255,255,255,0.05);
+        }
+        
+        .nav-item.active {
+            background: linear-gradient(135deg, var(--accent-red), var(--accent-purple));
+            box-shadow: 0 4px 15px rgba(231, 76, 60, 0.3);
+        }
+        
+        .nav-item .icon { font-size: 1.2rem; }
+
+        /* 主内容区 */
+        .main-content {
+            margin-left: 280px;
+            padding: 30px;
+            min-height: 100vh;
+        }
+        
+        .page { display: none; }
+        .page.active { display: block; animation: fadeIn 0.3s ease; }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* 卡片 */
+        .card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 25px;
+            margin-bottom: 20px;
+            border: 1px solid var(--border-color);
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(10px);
+        }
+        
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+        }
+        
+        .card-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .card-title::before {
+            content: '';
+            width: 4px;
+            height: 20px;
+            background: linear-gradient(180deg, var(--accent-red), var(--accent-blue));
+            border-radius: 2px;
+        }
+
+        /* 表单元素 */
+        .form-group { margin-bottom: 20px; }
+        
+        label {
+            display: block;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+        
+        input, textarea, select {
+            width: 100%;
+            padding: 12px 16px;
+            font-size: 0.95rem;
+            font-family: 'JetBrains Mono', monospace;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            color: var(--text-primary);
+            transition: all 0.3s ease;
+        }
+        
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.2);
+        }
+        
+        textarea { min-height: 100px; resize: vertical; }
+
+        /* 按钮 */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 24px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-red), var(--accent-purple));
+            color: white;
+            box-shadow: 0 4px 15px rgba(231, 76, 60, 0.3);
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(231, 76, 60, 0.4);
+        }
+        
+        .btn-secondary {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+        
+        .btn-secondary:hover {
+            background: var(--bg-secondary);
+            border-color: var(--accent-blue);
+        }
+        
+        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
+
+        /* 统计网格 */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, var(--bg-tertiary), var(--bg-primary));
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+            border: 1px solid var(--border-color);
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        .stat-value.red { color: var(--accent-red); }
+        .stat-value.blue { color: var(--accent-blue); }
+        .stat-value.green { color: var(--accent-green); }
+        .stat-value.orange { color: var(--accent-orange); }
+        .stat-value.purple { color: var(--accent-purple); }
+        
+        .stat-label { font-size: 0.85rem; color: var(--text-secondary); margin-top: 5px; }
+
+        /* 依赖图容器 */
+        #graph-container {
+            width: 100%;
+            height: 600px;
+            background: var(--bg-primary);
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+        }
+
+        /* 模块列表 */
+        .module-list {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        
+        .module-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 15px;
+            background: var(--bg-primary);
+            border-radius: 10px;
+            margin-bottom: 8px;
+            border: 1px solid var(--border-color);
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .module-item:hover {
+            border-color: var(--accent-blue);
+            transform: translateX(5px);
+        }
+        
+        .module-name {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            color: var(--accent-green);
+        }
+        
+        .module-info {
+            display: flex;
+            gap: 15px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 20px;
+            font-size: 0.7rem;
+            font-weight: 600;
+        }
+        
+        .badge-app { background: rgba(231, 76, 60, 0.2); color: var(--accent-red); }
+        .badge-core { background: rgba(52, 152, 219, 0.2); color: var(--accent-blue); }
+
+        /* 依赖树 */
+        .tree-container {
+            background: var(--bg-primary);
+            border-radius: 10px;
+            padding: 20px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            white-space: pre;
+            overflow-x: auto;
+            max-height: 500px;
+            overflow-y: auto;
+            line-height: 1.6;
+        }
+
+        /* 问题列表 */
+        .issue-item {
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .issue-item.warning {
+            background: rgba(243, 156, 18, 0.1);
+            border: 1px solid var(--accent-orange);
+        }
+        
+        .issue-item.error {
+            background: rgba(231, 76, 60, 0.1);
+            border: 1px solid var(--accent-red);
+        }
+        
+        .issue-item.success {
+            background: rgba(46, 204, 113, 0.1);
+            border: 1px solid var(--accent-green);
+        }
+        
+        .issue-title {
+            font-weight: 600;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* 安装顺序 */
+        .order-list {
+            counter-reset: order;
+        }
+        
+        .order-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 12px 15px;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            margin-bottom: 5px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .order-item::before {
+            counter-increment: order;
+            content: counter(order);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 30px;
+            height: 30px;
+            background: var(--accent-blue);
+            border-radius: 50%;
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+        
+        .order-item.core::before { background: var(--accent-purple); }
+
+        /* 图例 */
+        .legend {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+        }
+        
+        .legend-color {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+        }
+
+        /* 加载状态 */
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .loading.active { display: block; }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border-color);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* 搜索框 */
+        .search-box {
+            position: relative;
+            margin-bottom: 15px;
+        }
+        
+        .search-box input { padding-left: 40px; }
+        
+        .search-box::before {
+            content: '🔍';
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        /* 空状态 */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+        
+        .empty-state .icon { font-size: 4rem; margin-bottom: 20px; opacity: 0.5; }
+        
+        /* 滚动条 */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-primary); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: var(--bg-tertiary); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent-blue); }
+
+        /* 响应式 */
+        @media (max-width: 768px) {
+            .sidebar { width: 100%; height: auto; position: relative; }
+            .main-content { margin-left: 0; }
+        }
+    </style>
+</head>
+<body>
+    <!-- 侧边栏 -->
+    <div class="sidebar">
+        <div class="logo">🔗 Odoo Depends</div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">配置</div>
+            <div class="nav-item active" onclick="showPage('scan')">
+                <span class="icon">📂</span> 扫描模块
+            </div>
+        </div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">分析</div>
+            <div class="nav-item" onclick="showPage('graph')">
+                <span class="icon">📊</span> 依赖图
+            </div>
+            <div class="nav-item" onclick="showPage('modules')">
+                <span class="icon">📦</span> 模块列表
+            </div>
+            <div class="nav-item" onclick="showPage('tree')">
+                <span class="icon">🌳</span> 依赖树
+            </div>
+            <div class="nav-item" onclick="showPage('order')">
+                <span class="icon">📋</span> 安装顺序
+            </div>
+        </div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">诊断</div>
+            <div class="nav-item" onclick="showPage('issues')">
+                <span class="icon">🔍</span> 问题检查
+            </div>
+        </div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">升级分析</div>
+            <div class="nav-item" onclick="showPage('models')">
+                <span class="icon">🗄️</span> 模型分析
+            </div>
+            <div class="nav-item" onclick="showPage('impact')">
+                <span class="icon">⚡</span> 影响评估
+            </div>
+            <div class="nav-item" onclick="showPage('compare')">
+                <span class="icon">🔄</span> 版本对比
+            </div>
+        </div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">导出</div>
+            <div class="nav-item" onclick="exportData('json')">
+                <span class="icon">📄</span> 导出 JSON
+            </div>
+            <div class="nav-item" onclick="exportData('html')">
+                <span class="icon">🌐</span> 导出 HTML
+            </div>
+        </div>
+    </div>
+
+    <!-- 主内容 -->
+    <div class="main-content">
+        <!-- 扫描页面 -->
+        <div class="page active" id="page-scan">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">扫描 Odoo 模块</h2>
+                </div>
+                
+                <!-- 历史路径选择 -->
+                <div class="form-group" id="history-group" style="display: none;">
+                    <label>📂 历史路径</label>
+                    <select id="path-history" onchange="loadHistoryPath()" style="width: 100%; padding: 12px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary); margin-bottom: 10px;">
+                        <option value="">-- 选择历史路径 --</option>
+                    </select>
+                </div>
+                
+                <!-- 快捷路径按钮 -->
+                <div class="form-group">
+                    <label>⚡ 快速操作</label>
+                    <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
+                        <button class="btn btn-primary" style="font-size: 0.85rem; padding: 8px 16px;" onclick="openFolderBrowser()">📂 浏览文件夹</button>
+                        <button class="btn btn-secondary" style="font-size: 0.85rem; padding: 8px 12px;" onclick="addQuickPath('/Users/galaxy/Desktop/Odoo depends/odoo-test/addons')">📦 测试模块</button>
+                        <button class="btn btn-secondary" style="font-size: 0.85rem; padding: 8px 12px;" onclick="addQuickPath('/Users/galaxy/Desktop/Odoo depends/odoo-test/odoo-addons/addons')">🏭 Odoo内置</button>
+                        <button class="btn btn-secondary" style="font-size: 0.85rem; padding: 8px 12px;" onclick="clearPaths()">🗑️ 清空</button>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>模块路径（每行一个）</label>
+                    <textarea id="paths" placeholder="点击上方快速选择按钮，或手动输入路径"></textarea>
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-primary" onclick="scanModules()">🔍 开始扫描</button>
+                </div>
+            </div>
+            
+            <div class="loading" id="scan-loading">
+                <div class="spinner"></div>
+                <p>正在扫描模块...</p>
+            </div>
+            
+            <div id="scan-results" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">统计概览</h2>
+                    </div>
+                    <div class="stats-grid" id="stats-grid"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 依赖图页面 -->
+        <div class="page" id="page-graph">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">模块依赖关系图</h2>
+                    <div class="btn-group">
+                        <button class="btn btn-secondary" onclick="renderGraph(false)">📊 完整图</button>
+                        <button class="btn btn-secondary" onclick="renderGraph(true)">🎯 仅自定义</button>
+                    </div>
+                </div>
+                <div class="legend">
+                    <div class="legend-item"><div class="legend-color" style="background:#e74c3c"></div> 应用模块</div>
+                    <div class="legend-item"><div class="legend-color" style="background:#3498db"></div> 核心模块</div>
+                    <div class="legend-item"><div class="legend-color" style="background:#2ecc71"></div> 普通模块</div>
+                    <div class="legend-item"><div class="legend-color" style="background:#95a5a6"></div> 外部依赖</div>
+                </div>
+                <div id="graph-container"></div>
+            </div>
+        </div>
+
+        <!-- 模块列表页面 -->
+        <div class="page" id="page-modules">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">模块列表</h2>
+                </div>
+                <div class="search-box">
+                    <input type="text" id="module-search" placeholder="搜索模块..." oninput="filterModules()">
+                </div>
+                <div class="module-list" id="module-list"></div>
+            </div>
+        </div>
+
+        <!-- 依赖树页面 -->
+        <div class="page" id="page-tree">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">模块依赖树</h2>
+                </div>
+                <div class="form-group">
+                    <label>选择模块</label>
+                    <select id="tree-module" onchange="showTree()">
+                        <option value="">-- 请先扫描模块 --</option>
+                    </select>
+                </div>
+                <div class="tree-container" id="tree-output"></div>
+            </div>
+        </div>
+
+        <!-- 安装顺序页面 -->
+        <div class="page" id="page-order">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">安装顺序</h2>
+                </div>
+                <p style="color: var(--text-secondary); margin-bottom: 20px;">
+                    按照依赖关系计算的正确安装顺序（拓扑排序）
+                </p>
+                <div class="order-list" id="order-list"></div>
+            </div>
+        </div>
+
+        <!-- 问题检查页面 -->
+        <div class="page" id="page-issues">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">问题检查</h2>
+                    <button class="btn btn-secondary" onclick="checkIssues()">🔄 重新检查</button>
+                </div>
+                <div id="issues-list"></div>
+            </div>
+        </div>
+
+        <!-- 模型分析页面 -->
+        <div class="page" id="page-models">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">数据模型分析</h2>
+                    <button class="btn btn-primary" onclick="analyzeModels()">🔍 分析模型</button>
+                </div>
+                <div id="model-stats" style="margin-bottom: 20px;"></div>
+                <div class="search-box">
+                    <input type="text" id="model-search" placeholder="搜索模型..." oninput="filterModelsTable()">
+                </div>
+                <div class="module-list" id="models-list" style="max-height: 600px;"></div>
+            </div>
+        </div>
+
+        <!-- 升级影响评估页面 -->
+        <div class="page" id="page-impact">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">升级影响评估</h2>
+                </div>
+                <div class="form-group">
+                    <label>选择要评估的模块</label>
+                    <select id="impact-module" onchange="assessImpact()">
+                        <option value="">-- 请选择模块 --</option>
+                    </select>
+                </div>
+                <div id="impact-result"></div>
+            </div>
+        </div>
+
+        <!-- 版本对比页面 -->
+        <div class="page" id="page-compare">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">版本对比分析</h2>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div class="form-group">
+                        <label>源版本路径（当前版本）</label>
+                        <textarea id="source-paths" rows="3" placeholder="/path/to/odoo14/addons"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>目标版本路径（升级目标）</label>
+                        <textarea id="target-paths" rows="3" placeholder="/path/to/odoo17/addons"></textarea>
+                    </div>
+                </div>
+                <button class="btn btn-primary" onclick="compareVersions()">🔄 对比版本</button>
+                <div id="compare-result" style="margin-top: 20px;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let moduleData = null;
+        let network = null;
+        
+        function showPage(pageId) {
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            
+            document.getElementById('page-' + pageId).classList.add('active');
+            event.currentTarget.classList.add('active');
+            
+            // 页面切换时的特殊处理
+            if (pageId === 'graph' && moduleData) {
+                setTimeout(() => renderGraph(false), 100);
+            }
+            if (pageId === 'issues' && moduleData) {
+                checkIssues();
+            }
+            if (pageId === 'order' && moduleData) {
+                showOrder();
+            }
+        }
+        
+        // ========== 路径管理 ==========
+        const STORAGE_KEY = 'odoo_depends_path_history';
+        
+        function loadPathHistory() {
+            try {
+                const history = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+                const select = document.getElementById('path-history');
+                const group = document.getElementById('history-group');
+                
+                if (history.length > 0) {
+                    group.style.display = 'block';
+                    select.innerHTML = '<option value="">-- 选择历史路径 --</option>';
+                    history.forEach((paths, idx) => {
+                        const label = paths.length > 50 ? paths.substring(0, 47) + '...' : paths;
+                        const opt = document.createElement('option');
+                        opt.value = paths;
+                        opt.textContent = '📁 ' + label;
+                        select.appendChild(opt);
+                    });
+                }
+            } catch(e) {}
+        }
+        
+        function savePathHistory(paths) {
+            try {
+                let history = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+                // 去重
+                history = history.filter(h => h !== paths);
+                // 添加到开头
+                history.unshift(paths);
+                // 最多保存10条
+                history = history.slice(0, 10);
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+                loadPathHistory();
+            } catch(e) {}
+        }
+        
+        function loadHistoryPath() {
+            const select = document.getElementById('path-history');
+            if (select.value) {
+                document.getElementById('paths').value = select.value;
+            }
+        }
+        
+        function addQuickPath(path) {
+            const textarea = document.getElementById('paths');
+            const current = textarea.value.trim();
+            const paths = current ? current.split('\\n').filter(p => p.trim()) : [];
+            
+            // 避免重复
+            if (!paths.includes(path)) {
+                paths.push(path);
+            }
+            textarea.value = paths.join('\\n');
+        }
+        
+        function clearPaths() {
+            document.getElementById('paths').value = '';
+        }
+        
+        // 页面加载时加载历史记录
+        document.addEventListener('DOMContentLoaded', loadPathHistory);
+        
+        async function scanModules() {
+            const paths = document.getElementById('paths').value.split('\\n').filter(p => p.trim());
+            if (paths.length === 0) {
+                alert('请输入至少一个模块路径');
+                return;
+            }
+            
+            document.getElementById('scan-loading').classList.add('active');
+            document.getElementById('scan-results').style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paths })
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    alert('扫描失败: ' + data.error);
+                    return;
+                }
+                
+                moduleData = data;
+                // 保存成功扫描的路径到历史记录
+                savePathHistory(document.getElementById('paths').value.trim());
+                displayResults(data);
+            } catch (error) {
+                alert('请求失败: ' + error.message);
+            } finally {
+                document.getElementById('scan-loading').classList.remove('active');
+            }
+        }
+        
+        function displayResults(data) {
+            const stats = data.statistics;
+            
+            // 统计信息
+            document.getElementById('stats-grid').innerHTML = `
+                <div class="stat-card"><div class="stat-value blue">${stats.total_modules}</div><div class="stat-label">模块总数</div></div>
+                <div class="stat-card"><div class="stat-value green">${stats.total_dependencies}</div><div class="stat-label">依赖关系</div></div>
+                <div class="stat-card"><div class="stat-value purple">${stats.applications.length}</div><div class="stat-label">应用模块</div></div>
+                <div class="stat-card"><div class="stat-value orange">${stats.circular_dependencies.length}</div><div class="stat-label">循环依赖</div></div>
+                <div class="stat-card"><div class="stat-value red">${Object.keys(stats.missing_dependencies).length}</div><div class="stat-label">缺失依赖</div></div>
+                <div class="stat-card"><div class="stat-value blue">${stats.categories.length}</div><div class="stat-label">分类数量</div></div>
+            `;
+            
+            document.getElementById('scan-results').style.display = 'block';
+            
+            // 模块列表
+            updateModuleList(data.modules);
+            
+            // 模块选择器
+            updateModuleSelector(data.modules);
+        }
+        
+        function updateModuleList(modules) {
+            const list = Object.values(modules).sort((a, b) => a.name.localeCompare(b.name));
+            let html = '';
+            
+            for (const mod of list) {
+                const badges = mod.application ? '<span class="badge badge-app">应用</span>' : '';
+                html += `
+                    <div class="module-item" data-name="${mod.name.toLowerCase()}" onclick="showModuleDetail('${mod.name}')">
+                        <div>
+                            <span class="module-name">${mod.name}</span> ${badges}
+                        </div>
+                        <div class="module-info">
+                            <span>v${mod.version}</span>
+                            <span>${mod.depends.length} 依赖</span>
+                        </div>
+                    </div>
+                `;
+            }
+            document.getElementById('module-list').innerHTML = html;
+        }
+        
+        function updateModuleSelector(modules) {
+            const list = Object.values(modules).sort((a, b) => a.name.localeCompare(b.name));
+            let html = '<option value="">-- 选择模块 --</option>';
+            for (const mod of list) {
+                html += `<option value="${mod.name}">${mod.name}</option>`;
+            }
+            document.getElementById('tree-module').innerHTML = html;
+        }
+        
+        function filterModules() {
+            const search = document.getElementById('module-search').value.toLowerCase();
+            document.querySelectorAll('.module-item').forEach(item => {
+                item.style.display = item.dataset.name.includes(search) ? 'flex' : 'none';
+            });
+        }
+        
+        async function renderGraph(excludeExternal) {
+            if (!moduleData) {
+                alert('请先扫描模块');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/graph-data?exclude_external=${excludeExternal}`);
+                const data = await response.json();
+                
+                const container = document.getElementById('graph-container');
+                const nodes = new vis.DataSet(data.nodes);
+                const edges = new vis.DataSet(data.edges);
+                
+                const options = {
+                    nodes: {
+                        shape: 'dot',
+                        font: { color: '#ffffff', size: 12 },
+                        borderWidth: 2,
+                        shadow: true
+                    },
+                    edges: {
+                        arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+                        color: { color: '#4a4a6a', highlight: '#e74c3c' },
+                        smooth: { type: 'curvedCW', roundness: 0.2 }
+                    },
+                    physics: {
+                        barnesHut: {
+                            gravitationalConstant: -30000,
+                            centralGravity: 0.3,
+                            springLength: 150
+                        },
+                        stabilization: { iterations: 100 }
+                    },
+                    interaction: { hover: true, tooltipDelay: 200 }
+                };
+                
+                if (network) network.destroy();
+                network = new vis.Network(container, { nodes, edges }, options);
+                
+            } catch (error) {
+                alert('生成图表失败: ' + error.message);
+            }
+        }
+        
+        async function showTree() {
+            const moduleName = document.getElementById('tree-module').value;
+            if (!moduleName) return;
+            
+            try {
+                const response = await fetch(`/api/tree/${moduleName}`);
+                const data = await response.json();
+                document.getElementById('tree-output').textContent = data.tree;
+            } catch (error) {
+                alert('获取依赖树失败');
+            }
+        }
+        
+        async function showOrder() {
+            if (!moduleData) return;
+            
+            try {
+                const response = await fetch('/api/order');
+                const data = await response.json();
+                
+                let html = '';
+                for (const mod of data.order) {
+                    const isCore = data.core_modules.includes(mod);
+                    html += `<div class="order-item ${isCore ? 'core' : ''}">
+                        <span class="module-name">${mod}</span>
+                    </div>`;
+                }
+                document.getElementById('order-list').innerHTML = html;
+            } catch (error) {
+                alert('获取安装顺序失败');
+            }
+        }
+        
+        function checkIssues() {
+            if (!moduleData) {
+                document.getElementById('issues-list').innerHTML = `
+                    <div class="empty-state">
+                        <div class="icon">📂</div>
+                        <p>请先扫描模块</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            const stats = moduleData.statistics;
+            let html = '';
+            
+            // 循环依赖
+            if (stats.circular_dependencies.length > 0) {
+                html += `<div class="issue-item error">
+                    <div class="issue-title">🔄 循环依赖 (${stats.circular_dependencies.length})</div>
+                    ${stats.circular_dependencies.map(c => `<div style="margin-left:20px;font-family:monospace;">${c.join(' → ')} → ${c[0]}</div>`).join('')}
+                </div>`;
+            } else {
+                html += `<div class="issue-item success">
+                    <div class="issue-title">✅ 无循环依赖</div>
+                </div>`;
+            }
+            
+            // 缺失依赖
+            const missing = stats.missing_dependencies;
+            if (Object.keys(missing).length > 0) {
+                html += `<div class="issue-item warning">
+                    <div class="issue-title">❓ 缺失依赖 (${Object.keys(missing).length} 个模块)</div>
+                    ${Object.entries(missing).map(([m, deps]) => 
+                        `<div style="margin-left:20px;margin-top:8px;"><strong>${m}:</strong> ${deps.join(', ')}</div>`
+                    ).join('')}
+                </div>`;
+            } else {
+                html += `<div class="issue-item success">
+                    <div class="issue-title">✅ 无缺失依赖</div>
+                </div>`;
+            }
+            
+            document.getElementById('issues-list').innerHTML = html;
+        }
+        
+        function showModuleDetail(name) {
+            document.getElementById('tree-module').value = name;
+            showPage('tree');
+            document.querySelector('[onclick="showPage(\\'tree\\')"]').classList.add('active');
+            showTree();
+        }
+        
+        function exportData(format) {
+            if (!moduleData) {
+                alert('请先扫描模块');
+                return;
+            }
+            window.open(`/api/export/${format}`, '_blank');
+        }
+        
+        // ========== 模型分析 ==========
+        async function analyzeModels() {
+            if (!moduleData) {
+                alert('请先扫描模块');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/models');
+                const data = await response.json();
+                
+                // 显示统计信息
+                document.getElementById('model-stats').innerHTML = `
+                    <div class="stats-grid">
+                        <div class="stat-card"><div class="stat-value blue">${data.statistics.total_models}</div><div class="stat-label">模型总数</div></div>
+                        <div class="stat-card"><div class="stat-value green">${data.statistics.total_fields}</div><div class="stat-label">字段总数</div></div>
+                        <div class="stat-card"><div class="stat-value purple">${data.statistics.relation_fields}</div><div class="stat-label">关系字段</div></div>
+                        <div class="stat-card"><div class="stat-value orange">${data.statistics.computed_fields}</div><div class="stat-label">计算字段</div></div>
+                    </div>
+                `;
+                
+                // 显示模型列表
+                let html = '';
+                const models = Object.entries(data.models).sort((a, b) => a[0].localeCompare(b[0]));
+                for (const [name, model] of models) {
+                    const fieldCount = Object.keys(model.fields || {}).length;
+                    html += `
+                        <div class="module-item" data-name="${name.toLowerCase()}" onclick="showModelDetail('${name}')">
+                            <div>
+                                <span class="module-name">${name}</span>
+                                <span style="color: var(--text-secondary); margin-left: 10px;">${model.module}</span>
+                            </div>
+                            <div class="module-info">
+                                <span>${fieldCount} 字段</span>
+                                <span>${model.methods?.length || 0} 方法</span>
+                            </div>
+                        </div>
+                    `;
+                }
+                document.getElementById('models-list').innerHTML = html || '<div class="empty-state"><p>未找到模型定义</p></div>';
+                
+                // 保存数据供后续使用
+                window.modelsData = data.models;
+            } catch (error) {
+                alert('分析模型失败: ' + error.message);
+            }
+        }
+        
+        function filterModelsTable() {
+            const search = document.getElementById('model-search').value.toLowerCase();
+            document.querySelectorAll('#models-list .module-item').forEach(item => {
+                item.style.display = item.dataset.name.includes(search) ? 'flex' : 'none';
+            });
+        }
+        
+        function showModelDetail(modelName) {
+            if (!window.modelsData || !window.modelsData[modelName]) return;
+            const model = window.modelsData[modelName];
+            
+            let fieldsHtml = '';
+            for (const [fname, field] of Object.entries(model.fields || {})) {
+                const typeColor = field.field_type.includes('2') ? 'var(--accent-purple)' : 'var(--accent-blue)';
+                fieldsHtml += `<div style="padding:8px;background:var(--bg-primary);border-radius:6px;margin:4px 0;">
+                    <span style="color:var(--accent-green);font-weight:600;">${fname}</span>
+                    <span style="color:${typeColor};margin-left:10px;">${field.field_type}</span>
+                    ${field.comodel_name ? `<span style="color:var(--text-secondary);"> → ${field.comodel_name}</span>` : ''}
+                </div>`;
+            }
+            
+            alert('模型: ' + modelName + '\\n模块: ' + model.module + '\\n字段数: ' + Object.keys(model.fields || {}).length + '\\n方法数: ' + (model.methods?.length || 0));
+        }
+        
+        // ========== 升级影响评估 ==========
+        async function assessImpact() {
+            const moduleName = document.getElementById('impact-module').value;
+            if (!moduleName) {
+                document.getElementById('impact-result').innerHTML = '';
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/impact/${moduleName}`);
+                const data = await response.json();
+                
+                const riskColors = {
+                    'low': 'var(--accent-green)',
+                    'medium': 'var(--accent-orange)',
+                    'high': 'var(--accent-red)',
+                    'critical': '#ff0000'
+                };
+                const riskLabels = {
+                    'low': '低风险',
+                    'medium': '中等风险',
+                    'high': '高风险',
+                    'critical': '极高风险'
+                };
+                
+                document.getElementById('impact-result').innerHTML = `
+                    <div class="card" style="margin-top: 20px;">
+                        <h3 style="color: ${riskColors[data.risk_level]}; font-size: 1.5rem; margin-bottom: 20px;">
+                            ⚡ ${riskLabels[data.risk_level]}
+                        </h3>
+                        
+                        <div class="stats-grid" style="margin-bottom: 20px;">
+                            <div class="stat-card"><div class="stat-value blue">${data.direct_dependents.length}</div><div class="stat-label">直接依赖</div></div>
+                            <div class="stat-card"><div class="stat-value purple">${data.all_dependents.length}</div><div class="stat-label">全部依赖</div></div>
+                            <div class="stat-card"><div class="stat-value green">${data.affected_models.length}</div><div class="stat-label">受影响模型</div></div>
+                            <div class="stat-card"><div class="stat-value orange">${data.impact_score}</div><div class="stat-label">影响分数</div></div>
+                        </div>
+                        
+                        ${data.risk_factors.length ? `
+                        <div style="margin-bottom: 15px;">
+                            <strong>风险因素:</strong>
+                            <ul style="margin-top: 8px; padding-left: 20px;">
+                                ${data.risk_factors.map(f => `<li style="margin: 5px 0;">${f}</li>`).join('')}
+                            </ul>
+                        </div>
+                        ` : ''}
+                        
+                        <div style="margin-bottom: 15px;">
+                            <strong>建议:</strong>
+                            <ul style="margin-top: 8px; padding-left: 20px;">
+                                ${data.recommendations.map(r => `<li style="margin: 5px 0;">${r}</li>`).join('')}
+                            </ul>
+                        </div>
+                        
+                        ${data.direct_dependents.length ? `
+                        <div style="margin-bottom: 15px;">
+                            <strong>直接依赖此模块的模块:</strong>
+                            <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px;">
+                                ${data.direct_dependents.map(d => `<span class="badge badge-core">${d}</span>`).join('')}
+                            </div>
+                        </div>
+                        ` : ''}
+                        
+                        ${data.affected_models.length ? `
+                        <div>
+                            <strong>涉及的模型:</strong>
+                            <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px;">
+                                ${data.affected_models.slice(0, 20).map(m => `<span class="badge badge-app">${m}</span>`).join('')}
+                                ${data.affected_models.length > 20 ? `<span class="badge">+${data.affected_models.length - 20} 更多</span>` : ''}
+                            </div>
+                        </div>
+                        ` : ''}
+                    </div>
+                `;
+            } catch (error) {
+                alert('评估失败: ' + error.message);
+            }
+        }
+        
+        // ========== 版本对比 ==========
+        async function compareVersions() {
+            const sourcePaths = document.getElementById('source-paths').value.split('\\n').filter(p => p.trim());
+            const targetPaths = document.getElementById('target-paths').value.split('\\n').filter(p => p.trim());
+            
+            if (!sourcePaths.length || !targetPaths.length) {
+                alert('请输入源版本和目标版本的路径');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/compare', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source_paths: sourcePaths, target_paths: targetPaths })
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    alert('对比失败: ' + data.error);
+                    return;
+                }
+                
+                document.getElementById('compare-result').innerHTML = `
+                    <div class="stats-grid" style="margin-bottom: 20px;">
+                        <div class="stat-card"><div class="stat-value green">${data.summary.added}</div><div class="stat-label">新增模块</div></div>
+                        <div class="stat-card"><div class="stat-value red">${data.summary.removed}</div><div class="stat-label">删除模块</div></div>
+                        <div class="stat-card"><div class="stat-value orange">${data.summary.modified}</div><div class="stat-label">修改模块</div></div>
+                        <div class="stat-card"><div class="stat-value blue">${data.dependency_changes.length}</div><div class="stat-label">依赖变更</div></div>
+                    </div>
+                    
+                    ${data.added_modules.length ? `
+                    <div class="card">
+                        <h3 style="color: var(--accent-green);">✅ 新增模块 (${data.added_modules.length})</h3>
+                        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;">
+                            ${data.added_modules.slice(0, 50).map(m => `<span class="badge" style="background:rgba(46,204,113,0.2);color:var(--accent-green);">${m}</span>`).join('')}
+                            ${data.added_modules.length > 50 ? `<span class="badge">+${data.added_modules.length - 50} 更多</span>` : ''}
+                        </div>
+                    </div>
+                    ` : ''}
+                    
+                    ${data.removed_modules.length ? `
+                    <div class="card">
+                        <h3 style="color: var(--accent-red);">❌ 删除模块 (${data.removed_modules.length})</h3>
+                        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;">
+                            ${data.removed_modules.slice(0, 50).map(m => `<span class="badge" style="background:rgba(231,76,60,0.2);color:var(--accent-red);">${m}</span>`).join('')}
+                            ${data.removed_modules.length > 50 ? `<span class="badge">+${data.removed_modules.length - 50} 更多</span>` : ''}
+                        </div>
+                    </div>
+                    ` : ''}
+                    
+                    ${data.modified_modules.length ? `
+                    <div class="card">
+                        <h3 style="color: var(--accent-orange);">🔄 修改模块 (${data.modified_modules.length})</h3>
+                        <div style="margin-top: 10px;">
+                            ${data.modified_modules.slice(0, 20).map(m => `
+                                <div style="padding: 10px; background: var(--bg-primary); border-radius: 8px; margin: 5px 0;">
+                                    <strong style="color: var(--accent-green);">${m.name}</strong>
+                                    <div style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 5px;">
+                                        ${m.changes.join(' | ')}
+                                    </div>
+                                </div>
+                            `).join('')}
+                            ${data.modified_modules.length > 20 ? `<p style="color: var(--text-secondary);">...还有 ${data.modified_modules.length - 20} 个模块</p>` : ''}
+                        </div>
+                    </div>
+                    ` : ''}
+                    
+                    ${data.dependency_changes.length ? `
+                    <div class="card">
+                        <h3 style="color: var(--accent-blue);">🔗 依赖变更 (${data.dependency_changes.length})</h3>
+                        <div style="margin-top: 10px;">
+                            ${data.dependency_changes.slice(0, 15).map(c => `
+                                <div style="padding: 10px; background: var(--bg-primary); border-radius: 8px; margin: 5px 0;">
+                                    <strong style="color: var(--accent-green);">${c.module}</strong>
+                                    ${c.added_dependencies.length ? `<div style="color: var(--accent-green); font-size: 0.85rem;">+ ${c.added_dependencies.join(', ')}</div>` : ''}
+                                    ${c.removed_dependencies.length ? `<div style="color: var(--accent-red); font-size: 0.85rem;">- ${c.removed_dependencies.join(', ')}</div>` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                    ` : ''}
+                `;
+            } catch (error) {
+                alert('请求失败: ' + error.message);
+            }
+        }
+        
+        // 更新显示逻辑
+        const originalShowPage = showPage;
+        showPage = function(pageId) {
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            
+            document.getElementById('page-' + pageId).classList.add('active');
+            if (event && event.currentTarget) {
+                event.currentTarget.classList.add('active');
+            }
+            
+            if (pageId === 'graph' && moduleData) {
+                setTimeout(() => renderGraph(false), 100);
+            }
+            if (pageId === 'issues' && moduleData) {
+                checkIssues();
+            }
+            if (pageId === 'order' && moduleData) {
+                showOrder();
+            }
+            if (pageId === 'impact' && moduleData) {
+                // 更新模块选择器
+                const select = document.getElementById('impact-module');
+                if (select.options.length <= 1) {
+                    const modules = Object.keys(moduleData.modules).sort();
+                    for (const mod of modules) {
+                        const opt = document.createElement('option');
+                        opt.value = mod;
+                        opt.textContent = mod;
+                        select.appendChild(opt);
+                    }
+                }
+            }
+        }
+        
+        // ========== 文件夹浏览器 ==========
+        let currentBrowsePath = '';
+        
+        async function openFolderBrowser() {
+            document.getElementById('folder-modal').style.display = 'flex';
+            // 加载初始目录
+            await browseTo('~');
+        }
+        
+        function closeFolderBrowser() {
+            document.getElementById('folder-modal').style.display = 'none';
+        }
+        
+        async function browseTo(path) {
+            const listEl = document.getElementById('folder-list');
+            listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);">加载中...</div>';
+            
+            try {
+                const response = await fetch('/api/browse?path=' + encodeURIComponent(path));
+                const data = await response.json();
+                
+                if (data.error) {
+                    listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--accent-red);">❌ ' + data.error + '</div>';
+                    return;
+                }
+                
+                currentBrowsePath = data.path;
+                document.getElementById('current-path').textContent = data.path;
+                document.getElementById('current-path-input').value = data.path;
+                
+                let html = '';
+                
+                // 返回上级目录
+                if (data.parent) {
+                    html += '<div class="folder-item" onclick="browseTo(\\'' + data.parent.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'") + '\\')"><span class="folder-icon">⬆️</span><span class="folder-name">..</span><span class="folder-type">返回上级</span></div>';
+                }
+                
+                // 目录和模块
+                for (const item of data.items) {
+                    if (item.is_dir) {
+                        const escapedPath = item.path.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
+                        const icon = item.is_odoo_module ? '📦' : '📁';
+                        const typeLabel = item.is_odoo_module ? '<span style="color:var(--accent-green);">Odoo模块</span>' : '文件夹';
+                        html += '<div class="folder-item' + (item.is_odoo_module ? ' odoo-module' : '') + '" onclick="browseTo(\\'' + escapedPath + '\\')" ondblclick="selectAndClose(\\'' + escapedPath + '\\')"><span class="folder-icon">' + icon + '</span><span class="folder-name">' + item.name + '</span><span class="folder-type">' + typeLabel + '</span>' + (item.is_odoo_module ? '<button class="btn btn-sm" onclick="event.stopPropagation();selectFolder(\\'' + escapedPath + '\\')">选择</button>' : '') + '</div>';
+                    }
+                }
+                
+                if (!html) {
+                    html = '<div style="text-align:center;padding:40px;color:var(--text-secondary);">📭 此目录为空</div>';
+                }
+                
+                listEl.innerHTML = html;
+            } catch (error) {
+                listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--accent-red);">❌ 加载失败: ' + error.message + '</div>';
+            }
+        }
+        
+        function selectFolder(path) {
+            addQuickPath(path);
+            closeFolderBrowser();
+        }
+        
+        function selectAndClose(path) {
+            selectFolder(path);
+        }
+        
+        function selectCurrentFolder() {
+            if (currentBrowsePath) {
+                addQuickPath(currentBrowsePath);
+                closeFolderBrowser();
+            }
+        }
+        
+        function goToPath() {
+            const path = document.getElementById('current-path-input').value;
+            if (path) {
+                browseTo(path);
+            }
+        }
+        
+        // 点击模态框背景关闭
+        document.addEventListener('click', function(e) {
+            if (e.target.id === 'folder-modal') {
+                closeFolderBrowser();
+            }
+        });
+    </script>
+    
+    <!-- 文件夹浏览器模态框 -->
+    <div id="folder-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:1000;align-items:center;justify-content:center;">
+        <div style="background:var(--bg-secondary);border-radius:16px;width:90%;max-width:800px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+            <div style="padding:20px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;justify-content:space-between;">
+                <h2 style="margin:0;font-size:1.2rem;">📂 选择文件夹</h2>
+                <button onclick="closeFolderBrowser()" style="background:none;border:none;color:var(--text-secondary);font-size:1.5rem;cursor:pointer;">&times;</button>
+            </div>
+            <div style="padding:15px;border-bottom:1px solid var(--border-color);display:flex;gap:10px;">
+                <input type="text" id="current-path-input" style="flex:1;padding:10px 15px;background:var(--bg-primary);border:1px solid var(--border-color);border-radius:8px;color:var(--text-primary);font-family:var(--font-mono);" placeholder="输入路径...">
+                <button class="btn btn-secondary" onclick="goToPath()">前往</button>
+            </div>
+            <div style="padding:10px 15px;background:var(--bg-primary);border-bottom:1px solid var(--border-color);">
+                <span style="color:var(--text-secondary);font-size:0.85rem;">当前位置: </span>
+                <span id="current-path" style="color:var(--accent-cyan);font-family:var(--font-mono);font-size:0.85rem;"></span>
+            </div>
+            <div id="folder-list" style="flex:1;overflow-y:auto;padding:10px;">
+                <!-- 文件夹列表 -->
+            </div>
+            <div style="padding:15px;border-top:1px solid var(--border-color);display:flex;justify-content:space-between;align-items:center;">
+                <span style="color:var(--text-secondary);font-size:0.85rem;">💡 双击 Odoo 模块可快速选择</span>
+                <div style="display:flex;gap:10px;">
+                    <button class="btn btn-secondary" onclick="closeFolderBrowser()">取消</button>
+                    <button class="btn btn-primary" onclick="selectCurrentFolder()">选择当前目录</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <style>
+        .folder-item {
+            display: flex;
+            align-items: center;
+            padding: 12px 15px;
+            margin: 4px 0;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .folder-item:hover {
+            background: var(--bg-tertiary);
+            transform: translateX(5px);
+        }
+        .folder-item.odoo-module {
+            border-left: 3px solid var(--accent-green);
+        }
+        .folder-icon {
+            font-size: 1.3rem;
+            margin-right: 12px;
+        }
+        .folder-name {
+            flex: 1;
+            font-weight: 500;
+        }
+        .folder-type {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-right: 10px;
+        }
+        .btn-sm {
+            padding: 5px 12px !important;
+            font-size: 0.8rem !important;
+        }
+    </style>
+</body>
+</html>
+'''
+
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+
+@app.route('/api/scan', methods=['POST'])
+def scan():
+    global analyzer, visualizer
+    
+    data = request.get_json()
+    paths = data.get('paths', [])
+    
+    if not paths:
+        return jsonify({'error': '请提供至少一个路径'})
+    
+    try:
+        analyzer = OdooModuleAnalyzer(paths)
+        analyzer.scan_modules()
+        analyzer.build_dependency_graph()
+        visualizer = DependencyVisualizer(analyzer)
+        
+        return jsonify({
+            'modules': {name: mod.to_dict() for name, mod in analyzer.modules.items()},
+            'statistics': analyzer.get_statistics()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+@app.route('/api/graph-data')
+def graph_data():
+    global analyzer
+    
+    if not analyzer:
+        return jsonify({'error': '请先扫描模块'})
+    
+    exclude_external = request.args.get('exclude_external', 'false').lower() == 'true'
+    
+    nodes = []
+    edges = []
+    
+    COLORS = {
+        'application': '#e74c3c',
+        'core': '#3498db',
+        'external': '#95a5a6',
+        'normal': '#2ecc71',
+    }
+    
+    for node in analyzer.graph.nodes():
+        attrs = dict(analyzer.graph.nodes[node])
+        
+        if exclude_external and attrs.get('is_external'):
+            continue
+        
+        # 确定颜色
+        if attrs.get('is_external'):
+            color = COLORS['external']
+        elif attrs.get('is_core'):
+            color = COLORS['core']
+        elif attrs.get('application'):
+            color = COLORS['application']
+        else:
+            color = COLORS['normal']
+        
+        # 节点大小
+        in_degree = analyzer.graph.in_degree(node)
+        size = max(15, min(50, 15 + in_degree * 3))
+        
+        nodes.append({
+            'id': node,
+            'label': node,
+            'color': color,
+            'size': size,
+            'title': f"{node}\\n依赖数: {len(list(analyzer.graph.successors(node)))}\\n被依赖: {in_degree}"
+        })
+    
+    node_ids = {n['id'] for n in nodes}
+    
+    for source, target in analyzer.graph.edges():
+        if source in node_ids and target in node_ids:
+            edges.append({'from': source, 'to': target})
+    
+    return jsonify({'nodes': nodes, 'edges': edges})
+
+
+@app.route('/api/tree/<module_name>')
+def tree(module_name):
+    global visualizer
+    
+    if not visualizer:
+        return jsonify({'error': '请先扫描模块'})
+    
+    tree_text = visualizer.generate_module_tree(module_name)
+    return jsonify({'tree': tree_text})
+
+
+@app.route('/api/order')
+def order():
+    global analyzer
+    
+    if not analyzer:
+        return jsonify({'error': '请先扫描模块'})
+    
+    install_order = analyzer.get_install_order()
+    core_modules = list(analyzer.CORE_MODULES)
+    
+    return jsonify({'order': install_order, 'core_modules': core_modules})
+
+
+@app.route('/api/export/<format>')
+def export(format):
+    global analyzer, visualizer
+    
+    if not analyzer:
+        return "请先扫描模块", 400
+    
+    if format == 'json':
+        output = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
+        analyzer.export_to_json(output.name)
+        return send_file(output.name, as_attachment=True, download_name='odoo_modules.json')
+    
+    elif format == 'html':
+        output = tempfile.NamedTemporaryFile(delete=False, suffix='.html')
+        visualizer.generate_interactive_html(output.name)
+        return send_file(output.name, as_attachment=True, download_name='odoo_dependency_graph.html')
+    
+    return "不支持的格式", 400
+
+
+@app.route('/api/models')
+def models():
+    """获取模型分析结果"""
+    global analyzer, upgrade_analyzer
+    
+    if not analyzer:
+        return jsonify({'error': '请先扫描模块'})
+    
+    try:
+        models = upgrade_analyzer.analyze_models(analyzer)
+        stats = upgrade_analyzer.get_model_statistics()
+        
+        return jsonify({
+            'models': {name: model.to_dict() for name, model in models.items()},
+            'statistics': stats,
+            'relationships': upgrade_analyzer.get_model_relationships()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+@app.route('/api/impact/<module_name>')
+def impact(module_name):
+    """获取模块升级影响评估"""
+    global analyzer, upgrade_analyzer
+    
+    if not analyzer:
+        return jsonify({'error': '请先扫描模块'})
+    
+    try:
+        impact = upgrade_analyzer.assess_upgrade_impact(module_name, analyzer)
+        return jsonify(impact.to_dict())
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+@app.route('/api/compare', methods=['POST'])
+def compare():
+    """对比两个版本"""
+    global upgrade_analyzer
+    
+    data = request.get_json()
+    source_paths = data.get('source_paths', [])
+    target_paths = data.get('target_paths', [])
+    
+    if not source_paths or not target_paths:
+        return jsonify({'error': '请提供源版本和目标版本路径'})
+    
+    try:
+        upgrade_analyzer.load_source(source_paths)
+        upgrade_analyzer.load_target(target_paths)
+        diff = upgrade_analyzer.compare_versions()
+        
+        return jsonify(diff.to_dict())
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+@app.route('/api/browse')
+def browse_directory():
+    """浏览本地目录"""
+    import os
+    
+    path = request.args.get('path', os.path.expanduser('~'))
+    
+    try:
+        # 规范化路径
+        path = os.path.abspath(os.path.expanduser(path))
+        
+        if not os.path.exists(path):
+            return jsonify({'error': '路径不存在', 'path': path})
+        
+        if not os.path.isdir(path):
+            return jsonify({'error': '不是目录', 'path': path})
+        
+        # 获取目录内容
+        items = []
+        try:
+            for name in sorted(os.listdir(path)):
+                if name.startswith('.'):
+                    continue  # 跳过隐藏文件
+                full_path = os.path.join(path, name)
+                try:
+                    is_dir = os.path.isdir(full_path)
+                    # 检查是否是 Odoo 模块
+                    is_odoo_module = is_dir and (
+                        os.path.exists(os.path.join(full_path, '__manifest__.py')) or
+                        os.path.exists(os.path.join(full_path, '__openerp__.py'))
+                    )
+                    items.append({
+                        'name': name,
+                        'path': full_path,
+                        'is_dir': is_dir,
+                        'is_odoo_module': is_odoo_module,
+                    })
+                except PermissionError:
+                    continue
+        except PermissionError:
+            return jsonify({'error': '无权限访问此目录', 'path': path})
+        
+        # 获取父目录
+        parent = os.path.dirname(path)
+        
+        return jsonify({
+            'path': path,
+            'parent': parent if parent != path else None,
+            'items': items,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'path': path})
+
+
+@app.route('/api/quick-paths')
+def get_quick_paths():
+    """获取常用快捷路径"""
+    import os
+    
+    home = os.path.expanduser('~')
+    paths = [
+        {'name': '🏠 主目录', 'path': home},
+        {'name': '💻 桌面', 'path': os.path.join(home, 'Desktop')},
+        {'name': '📁 文档', 'path': os.path.join(home, 'Documents')},
+        {'name': '🐳 Docker Odoo', 'path': '/opt/odoo'},
+        {'name': '📦 项目测试模块', 'path': os.path.join(os.getcwd(), 'odoo-test', 'addons')},
+    ]
+    
+    # 只返回存在的路径
+    return jsonify([p for p in paths if os.path.exists(p['path'])])
+
+
+def run_server(host='0.0.0.0', port=5000, debug=False):
+    print(f"\n🚀 Odoo模块依赖分析器已启动!")
+    print(f"📍 访问地址: http://localhost:{port}")
+    print(f"📍 网络地址: http://{host}:{port}\n")
+    app.run(host=host, port=port, debug=debug)
+
+
+if __name__ == '__main__':
+    run_server(debug=True)
