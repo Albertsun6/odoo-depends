@@ -60,3 +60,5 @@ htmlcov/
 .env
 .env.local
 config.local.py
+.vercel
+.env*.local
