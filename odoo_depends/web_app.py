@@ -570,15 +570,19 @@ HTML_TEMPLATE = '''
                 <div class="form-group">
                     <label>⚡ 快速操作</label>
                     <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
-                        <button class="btn btn-primary" style="font-size: 0.85rem; padding: 8px 16px;" onclick="openFolderBrowser()">📂 浏览文件夹</button>
-                        <button class="btn btn-secondary" style="font-size: 0.85rem; padding: 8px 12px;" onclick="addQuickPath('/Users/galaxy/Desktop/Odoo depends/odoo-test/addons')">📦 测试模块</button>
-                        <button class="btn btn-secondary" style="font-size: 0.85rem; padding: 8px 12px;" onclick="addQuickPath('/Users/galaxy/Desktop/Odoo depends/odoo-test/odoo-addons/addons')">🏭 Odoo内置</button>
+                        <button class="btn btn-primary" style="font-size: 0.85rem; padding: 8px 16px;" onclick="document.getElementById('zip-upload').click()">📤 上传 ZIP</button>
+                        <button class="btn btn-secondary" style="font-size: 0.85rem; padding: 8px 12px;" onclick="openFolderBrowser()">📂 浏览文件夹</button>
+                        <button class="btn btn-secondary" style="font-size: 0.85rem; padding: 8px 12px;" onclick="loadDemoModules()">🎯 加载示例</button>
                         <button class="btn btn-secondary" style="font-size: 0.85rem; padding: 8px 12px;" onclick="clearPaths()">🗑️ 清空</button>
                     </div>
+                    <input type="file" id="zip-upload" accept=".zip" style="display:none;" onchange="uploadZip(this)">
+                    <p style="color: var(--text-secondary); font-size: 0.8rem; margin-top: 8px;">
+                        💡 在线版请使用「上传 ZIP」功能，本地版可使用「浏览文件夹」
+                    </p>
                 </div>
                 
-                <div class="form-group">
-                    <label>模块路径（每行一个）</label>
+                <div class="form-group" id="local-path-group">
+                    <label>模块路径（每行一个）- 仅本地版可用</label>
                     <textarea id="paths" placeholder="点击上方快速选择按钮，或手动输入路径"></textarea>
                 </div>
                 <div class="btn-group">
@@ -808,6 +812,82 @@ HTML_TEMPLATE = '''
         
         function clearPaths() {
             document.getElementById('paths').value = '';
+        }
+        
+        // 上传 ZIP 文件
+        async function uploadZip(input) {
+            if (!input.files || !input.files[0]) return;
+            
+            const file = input.files[0];
+            if (!file.name.endsWith('.zip')) {
+                alert('请上传 .zip 格式的文件');
+                return;
+            }
+            
+            document.getElementById('scan-loading').classList.add('active');
+            document.getElementById('scan-results').style.display = 'none';
+            
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    alert('上传失败: ' + data.error);
+                    return;
+                }
+                
+                moduleData = data;
+                displayResults(data);
+            } catch (error) {
+                alert('上传失败: ' + error.message);
+            } finally {
+                document.getElementById('scan-loading').classList.remove('active');
+                input.value = '';  // 清空文件选择
+            }
+        }
+        
+        // 加载示例模块数据
+        async function loadDemoModules() {
+            document.getElementById('scan-loading').classList.add('active');
+            document.getElementById('scan-results').style.display = 'none';
+            
+            // 示例数据 - 模拟 Odoo 模块结构
+            const demoData = {
+                modules: {
+                    'base': {name: 'base', version: '17.0.1.0.0', category: 'Hidden', depends: [], application: false, author: 'Odoo S.A.', summary: 'Odoo Base Module', path: '/demo/base', installable: true, auto_install: false, license: 'LGPL-3', data: [], description: ''},
+                    'mail': {name: 'mail', version: '17.0.1.0.0', category: 'Communication', depends: ['base'], application: false, author: 'Odoo S.A.', summary: 'Email & Messaging', path: '/demo/mail', installable: true, auto_install: false, license: 'LGPL-3', data: [], description: ''},
+                    'sale': {name: 'sale', version: '17.0.1.0.0', category: 'Sales', depends: ['base', 'mail', 'product'], application: true, author: 'Odoo S.A.', summary: 'Sales Management', path: '/demo/sale', installable: true, auto_install: false, license: 'LGPL-3', data: [], description: ''},
+                    'purchase': {name: 'purchase', version: '17.0.1.0.0', category: 'Inventory/Purchase', depends: ['base', 'mail', 'product'], application: true, author: 'Odoo S.A.', summary: 'Purchase Management', path: '/demo/purchase', installable: true, auto_install: false, license: 'LGPL-3', data: [], description: ''},
+                    'product': {name: 'product', version: '17.0.1.0.0', category: 'Sales/Products', depends: ['base', 'mail'], application: false, author: 'Odoo S.A.', summary: 'Product Catalog', path: '/demo/product', installable: true, auto_install: false, license: 'LGPL-3', data: [], description: ''},
+                    'stock': {name: 'stock', version: '17.0.1.0.0', category: 'Inventory', depends: ['base', 'mail', 'product'], application: true, author: 'Odoo S.A.', summary: 'Inventory Management', path: '/demo/stock', installable: true, auto_install: false, license: 'LGPL-3', data: [], description: ''},
+                    'account': {name: 'account', version: '17.0.1.0.0', category: 'Accounting', depends: ['base', 'mail', 'product'], application: true, author: 'Odoo S.A.', summary: 'Invoicing & Accounting', path: '/demo/account', installable: true, auto_install: false, license: 'LGPL-3', data: [], description: ''},
+                    'crm': {name: 'crm', version: '17.0.1.0.0', category: 'Sales/CRM', depends: ['base', 'mail', 'sale'], application: true, author: 'Odoo S.A.', summary: 'Customer Relationship Management', path: '/demo/crm', installable: true, auto_install: false, license: 'LGPL-3', data: [], description: ''},
+                    'website': {name: 'website', version: '17.0.1.0.0', category: 'Website', depends: ['base', 'mail'], application: true, author: 'Odoo S.A.', summary: 'Website Builder', path: '/demo/website', installable: true, auto_install: false, license: 'LGPL-3', data: [], description: ''},
+                    'hr': {name: 'hr', version: '17.0.1.0.0', category: 'Human Resources', depends: ['base', 'mail'], application: true, author: 'Odoo S.A.', summary: 'Employees Management', path: '/demo/hr', installable: true, auto_install: false, license: 'LGPL-3', data: [], description: ''},
+                },
+                statistics: {
+                    total_modules: 10,
+                    total_dependencies: 22,
+                    unique_dependencies: 4,
+                    applications: ['sale', 'purchase', 'stock', 'account', 'crm', 'website', 'hr'],
+                    categories: ['Hidden', 'Communication', 'Sales', 'Inventory/Purchase', 'Sales/Products', 'Inventory', 'Accounting', 'Sales/CRM', 'Website', 'Human Resources'],
+                    circular_dependencies: [],
+                    missing_dependencies: {},
+                    external_dependencies: [],
+                    core_dependencies: ['base', 'mail', 'product'],
+                    most_depended_modules: [['base', 9], ['mail', 8], ['product', 4], ['sale', 1]]
+                }
+            };
+            
+            moduleData = demoData;
+            displayResults(demoData);
+            document.getElementById('scan-loading').classList.remove('active');
         }
         
         // 页面加载时加载历史记录
@@ -1499,6 +1579,51 @@ def scan():
             'modules': {name: mod.to_dict() for name, mod in analyzer.modules.items()},
             'statistics': analyzer.get_statistics()
         })
+
+
+@app.route('/api/upload', methods=['POST'])
+def upload_modules():
+    """上传并分析 Odoo 模块 zip 文件"""
+    global analyzer, visualizer
+    import zipfile
+    import shutil
+    
+    if 'file' not in request.files:
+        return jsonify({'error': '请上传文件'})
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': '未选择文件'})
+    
+    if not file.filename.endswith('.zip'):
+        return jsonify({'error': '请上传 zip 格式文件'})
+    
+    try:
+        # 创建临时目录
+        upload_dir = tempfile.mkdtemp(prefix='odoo_upload_')
+        zip_path = os.path.join(upload_dir, 'modules.zip')
+        extract_dir = os.path.join(upload_dir, 'modules')
+        
+        # 保存并解压
+        file.save(zip_path)
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
+        
+        # 分析模块
+        analyzer = OdooModuleAnalyzer([extract_dir])
+        analyzer.scan_modules()
+        analyzer.build_dependency_graph()
+        visualizer = DependencyVisualizer(analyzer)
+        
+        result = {
+            'modules': {name: mod.to_dict() for name, mod in analyzer.modules.items()},
+            'statistics': analyzer.get_statistics()
+        }
+        
+        # 清理临时文件
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        
+        return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)})
 
