@@ -119,6 +119,25 @@ odoo-depends/
 - **PyVis** - 交互式可视化
 - **Click** - 命令行框架
 
+## 🚀 部署到 Vercel
+
+### 方式一：通过 Vercel Dashboard（推荐）
+
+1. 访问 [vercel.com](https://vercel.com) 并登录
+2. 点击 "Add New Project"
+3. 导入 GitHub 仓库 `odoo-depends`
+4. 使用默认配置，点击 "Deploy"
+
+### 方式二：通过命令行
+
+```bash
+# 登录 Vercel
+npx vercel login
+
+# 部署
+npx vercel --prod
+```
+
 ## 📝 许可证
 
 MIT License
@@ -126,3 +145,7 @@ MIT License
 ## 🤝 贡献
 
 欢迎提交 Issue 和 Pull Request！
+
+## 🔗 链接
+
+- **GitHub**: https://github.com/Albertsun6/odoo-depends
