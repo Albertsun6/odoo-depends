@@ -1718,7 +1718,6 @@ HTML_TEMPLATE = '''
             const moduleFilter = document.getElementById('model-module-select').value;
             const search = document.getElementById('model-search').value.toLowerCase();
             renderModelsList(window.modelsData, moduleFilter, search);
-            });
         }
         
         function showModelDetail(modelName) {
