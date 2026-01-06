@@ -11,6 +11,7 @@ from flask import Flask, render_template_string, request, jsonify, send_file
 from .analyzer import OdooModuleAnalyzer
 from .visualizer import DependencyVisualizer
 from .upgrade_analyzer import UpgradeAnalyzer, ModelAnalyzer
+from .migration_helper import MigrationHelper
 from .cloud_storage import get_storage, LocalStorage, AnalysisRecord, generate_record_id
 from datetime import datetime
 
@@ -549,6 +550,9 @@ HTML_TEMPLATE = '''
             <div class="nav-item" onclick="showPage('compare')">
                 <span class="icon">🔄</span> 版本对比
             </div>
+            <div class="nav-item" onclick="showPage('migration')">
+                <span class="icon">🛠️</span> 升级工具
+            </div>
         </div>
         
         <div class="nav-section">
@@ -758,6 +762,48 @@ HTML_TEMPLATE = '''
                 <div id="compare-result" style="margin-top: 20px;"></div>
             </div>
         </div>
+        
+        <!-- 升级工具页面 -->
+        <div class="page" id="page-migration">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">🛠️ 升级辅助工具</h2>
+                </div>
+                <p style="color: var(--text-secondary); margin-bottom: 20px;">
+                    分析代码问题、生成迁移脚本、创建升级检查清单
+                </p>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                    <div class="form-group">
+                        <label>源版本</label>
+                        <select id="migration-source" style="width:100%;padding:10px;background:var(--bg-primary);border:1px solid var(--border-color);border-radius:8px;color:var(--text-primary);">
+                            <option value="14.0">Odoo 14.0</option>
+                            <option value="15.0">Odoo 15.0</option>
+                            <option value="16.0" selected>Odoo 16.0</option>
+                            <option value="17.0">Odoo 17.0</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>目标版本</label>
+                        <select id="migration-target" style="width:100%;padding:10px;background:var(--bg-primary);border:1px solid var(--border-color);border-radius:8px;color:var(--text-primary);">
+                            <option value="15.0">Odoo 15.0</option>
+                            <option value="16.0">Odoo 16.0</option>
+                            <option value="17.0" selected>Odoo 17.0</option>
+                            <option value="18.0">Odoo 18.0</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="btn btn-primary" onclick="analyzeMigration()">🔍 分析代码问题</button>
+                    <button class="btn btn-secondary" onclick="generateChecklist()">📋 生成检查清单</button>
+                    <button class="btn btn-secondary" onclick="showScriptGenerator()">📝 生成迁移脚本</button>
+                    <button class="btn" style="background: linear-gradient(135deg, #f39c12, #e67e22); color: white;" onclick="previewAutoFix()">🔧 预览自动修复</button>
+                </div>
+            </div>
+            
+            <div id="migration-result" style="margin-top: 20px;"></div>
+        </div>
     </div>
 
     <script>
@@ -807,6 +853,319 @@ HTML_TEMPLATE = '''
             }
             if (pageId === 'order' && moduleData) {
                 showOrder();
+            }
+        }
+        
+        // ========== 升级工具 ==========
+        let migrationReport = null;
+        
+        async function analyzeMigration() {
+            if (!moduleData) {
+                alert('请先扫描模块');
+                return;
+            }
+            
+            const sourceVersion = document.getElementById('migration-source').value;
+            const targetVersion = document.getElementById('migration-target').value;
+            
+            try {
+                const response = await fetch('/api/migration/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source_version: sourceVersion, target_version: targetVersion })
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    alert('分析失败: ' + data.error);
+                    return;
+                }
+                
+                migrationReport = data;
+                renderMigrationReport(data);
+                showNotification('✅ 代码分析完成', 'success');
+            } catch (error) {
+                alert('分析失败: ' + error.message);
+            }
+        }
+        
+        function renderMigrationReport(data) {
+            const resultEl = document.getElementById('migration-result');
+            
+            // 统计卡片
+            let html = `
+                <div class="stats-grid" style="margin-bottom: 20px;">
+                    <div class="stat-card"><div class="stat-value blue">${data.modules_count}</div><div class="stat-label">扫描模块</div></div>
+                    <div class="stat-card"><div class="stat-value ${data.issues_count > 0 ? 'red' : 'green'}">${data.issues_count}</div><div class="stat-label">代码问题</div></div>
+                    <div class="stat-card"><div class="stat-value orange">${data.auto_fixable_count}</div><div class="stat-label">可自动修复</div></div>
+                    <div class="stat-card"><div class="stat-value purple">${data.manual_fix_count}</div><div class="stat-label">需手动修复</div></div>
+                </div>
+            `;
+            
+            // 问题列表
+            if (data.issues_count > 0) {
+                html += '<div class="card"><h3 style="color: var(--accent-red); margin-bottom: 15px;">⚠️ 代码问题</h3>';
+                
+                for (const [moduleName, issues] of Object.entries(data.issues_by_module)) {
+                    html += `<div style="margin-bottom: 15px;">
+                        <h4 style="color: var(--accent-cyan); margin-bottom: 10px;">📦 ${moduleName} (${issues.length} 个问题)</h4>
+                        <div style="background: var(--bg-primary); border-radius: 8px; padding: 10px; max-height: 300px; overflow-y: auto;">
+                    `;
+                    
+                    for (const issue of issues.slice(0, 20)) {
+                        const autoTag = issue.auto_fixable ? 
+                            '<span style="background: var(--accent-green); color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 5px;">可自动修复</span>' : '';
+                        html += `
+                            <div style="padding: 8px; border-bottom: 1px solid var(--border-color);">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <span style="color: var(--text-secondary); font-family: var(--font-mono); font-size: 0.8rem;">行 ${issue.line_number}</span>
+                                    ${autoTag}
+                                </div>
+                                <div style="color: var(--accent-orange); margin: 5px 0;">${issue.description}</div>
+                                <div style="color: var(--text-secondary); font-size: 0.85rem;">💡 ${issue.suggestion}</div>
+                                <code style="display: block; background: rgba(0,0,0,0.3); padding: 5px; border-radius: 4px; margin-top: 5px; font-size: 0.8rem; overflow-x: auto;">${issue.line_content}</code>
+                            </div>
+                        `;
+                    }
+                    
+                    if (issues.length > 20) {
+                        html += `<div style="padding: 10px; color: var(--text-secondary);">... 还有 ${issues.length - 20} 个问题</div>`;
+                    }
+                    
+                    html += '</div></div>';
+                }
+                
+                html += '</div>';
+            } else {
+                html += '<div class="card" style="text-align: center; padding: 40px;"><span style="font-size: 3rem;">🎉</span><h3 style="margin-top: 15px; color: var(--accent-green);">代码检查通过！</h3><p style="color: var(--text-secondary);">没有检测到需要修改的问题</p></div>';
+            }
+            
+            resultEl.innerHTML = html;
+        }
+        
+        function generateChecklist() {
+            if (!migrationReport) {
+                alert('请先分析代码问题');
+                return;
+            }
+            
+            const checklist = migrationReport.checklist;
+            const resultEl = document.getElementById('migration-result');
+            
+            // 按分类分组
+            const categories = {
+                backup: { icon: '💾', title: '备份', items: [] },
+                environment: { icon: '🖥️', title: '环境准备', items: [] },
+                code: { icon: '📝', title: '代码检查', items: [] },
+                data: { icon: '🗄️', title: '数据检查', items: [] },
+                testing: { icon: '🧪', title: '测试', items: [] },
+                deployment: { icon: '🚀', title: '部署', items: [] },
+            };
+            
+            for (const item of checklist.items) {
+                if (categories[item.category]) {
+                    categories[item.category].items.push(item);
+                }
+            }
+            
+            let html = '<div class="card"><h3 style="margin-bottom: 20px;">📋 升级检查清单</h3>';
+            
+            for (const [key, cat] of Object.entries(categories)) {
+                if (cat.items.length === 0) continue;
+                
+                html += `<div style="margin-bottom: 20px;">
+                    <h4 style="color: var(--accent-cyan); margin-bottom: 10px;">${cat.icon} ${cat.title}</h4>
+                    <div style="background: var(--bg-primary); border-radius: 8px; padding: 10px;">
+                `;
+                
+                for (const item of cat.items) {
+                    const priorityColors = { critical: '#e74c3c', high: '#f39c12', medium: '#3498db', low: '#95a5a6' };
+                    const priorityLabels = { critical: '紧急', high: '高', medium: '中', low: '低' };
+                    const statusIcon = item.status === 'done' ? '✅' : '⬜';
+                    
+                    html += `
+                        <div style="padding: 10px; border-bottom: 1px solid var(--border-color); display: flex; align-items: flex-start; gap: 10px;">
+                            <span style="font-size: 1.2rem; cursor: pointer;" onclick="this.textContent = this.textContent === '⬜' ? '✅' : '⬜'">${statusIcon}</span>
+                            <div style="flex: 1;">
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <strong>${item.title}</strong>
+                                    <span style="background: ${priorityColors[item.priority]}; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem;">${priorityLabels[item.priority]}</span>
+                                </div>
+                                <div style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 5px;">${item.description}</div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                html += '</div></div>';
+            }
+            
+            html += '<button class="btn btn-primary" onclick="printChecklist()" style="margin-top: 15px;">🖨️ 打印清单</button></div>';
+            
+            resultEl.innerHTML = html;
+            showNotification('📋 检查清单已生成', 'success');
+        }
+        
+        function printChecklist() {
+            window.print();
+        }
+        
+        function showScriptGenerator() {
+            if (!moduleData) {
+                alert('请先扫描模块');
+                return;
+            }
+            
+            const modules = Object.keys(moduleData.modules);
+            const resultEl = document.getElementById('migration-result');
+            
+            let html = '<div class="card"><h3 style="margin-bottom: 20px;">📝 生成迁移脚本</h3>';
+            html += '<p style="color: var(--text-secondary); margin-bottom: 15px;">选择模块生成迁移脚本模板（pre-migrate.py, post-migrate.py, end-migrate.py）</p>';
+            
+            html += '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px;">';
+            
+            for (const mod of modules) {
+                html += `
+                    <div style="background: var(--bg-primary); padding: 15px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+                        <span>📦 ${mod}</span>
+                        <button class="btn btn-sm" style="background: var(--accent-cyan); color: white; padding: 5px 10px; font-size: 0.8rem;" onclick="generateScript('${mod}')">生成</button>
+                    </div>
+                `;
+            }
+            
+            html += '</div></div>';
+            resultEl.innerHTML = html;
+        }
+        
+        async function generateScript(moduleName) {
+            const sourceVersion = document.getElementById('migration-source').value;
+            const targetVersion = document.getElementById('migration-target').value;
+            
+            try {
+                const response = await fetch('/api/migration/scripts/' + moduleName + '/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source_version: sourceVersion, target_version: targetVersion })
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    alert('生成失败: ' + data.error);
+                    return;
+                }
+                
+                showNotification('✅ 脚本已保存到: ' + data.output_dir, 'success');
+            } catch (error) {
+                alert('生成失败: ' + error.message);
+            }
+        }
+        
+        async function previewAutoFix() {
+            if (!moduleData) {
+                alert('请先扫描模块');
+                return;
+            }
+            
+            const sourceVersion = document.getElementById('migration-source').value;
+            const targetVersion = document.getElementById('migration-target').value;
+            
+            try {
+                const response = await fetch('/api/migration/auto-fix', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        source_version: sourceVersion, 
+                        target_version: targetVersion,
+                        dry_run: true
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    alert('预览失败: ' + data.error);
+                    return;
+                }
+                
+                renderAutoFixPreview(data);
+            } catch (error) {
+                alert('预览失败: ' + error.message);
+            }
+        }
+        
+        function renderAutoFixPreview(data) {
+            const resultEl = document.getElementById('migration-result');
+            const fixCount = Object.values(data.fixes).reduce((sum, arr) => sum + arr.length, 0);
+            
+            let html = '<div class="card">';
+            html += '<h3 style="margin-bottom: 20px;">🔧 自动修复预览</h3>';
+            html += `<p style="color: var(--text-secondary); margin-bottom: 15px;">共有 <strong style="color: var(--accent-orange);">${fixCount}</strong> 处可自动修复的代码</p>`;
+            
+            if (fixCount > 0) {
+                for (const [filePath, fixes] of Object.entries(data.fixes)) {
+                    const fileName = filePath.split('/').pop();
+                    html += `
+                        <div style="margin-bottom: 15px;">
+                            <div style="color: var(--accent-cyan); font-family: var(--font-mono); margin-bottom: 5px;">${fileName}</div>
+                            <div style="background: var(--bg-primary); border-radius: 8px; padding: 10px;">
+                    `;
+                    
+                    for (const fix of fixes) {
+                        html += `
+                            <div style="padding: 5px 0; border-bottom: 1px solid var(--border-color);">
+                                <span style="color: var(--text-secondary);">行 ${fix.line}:</span> ${fix.description}
+                            </div>
+                        `;
+                    }
+                    
+                    html += '</div></div>';
+                }
+                
+                html += `
+                    <div style="margin-top: 20px; padding: 15px; background: rgba(243, 156, 18, 0.1); border-radius: 8px; border: 1px solid var(--accent-orange);">
+                        <p style="color: var(--accent-orange); margin-bottom: 10px;">⚠️ 警告：自动修复会直接修改源代码文件</p>
+                        <p style="color: var(--text-secondary); margin-bottom: 15px;">请确保已备份代码后再执行</p>
+                        <button class="btn" style="background: linear-gradient(135deg, #e74c3c, #c0392b); color: white;" onclick="applyAutoFix()">⚡ 确认应用修复</button>
+                    </div>
+                `;
+            } else {
+                html += '<div style="text-align: center; padding: 40px;"><span style="font-size: 3rem;">🎉</span><p style="margin-top: 15px; color: var(--accent-green);">没有需要自动修复的代码</p></div>';
+            }
+            
+            html += '</div>';
+            resultEl.innerHTML = html;
+        }
+        
+        async function applyAutoFix() {
+            if (!confirm('确定要应用自动修复吗？\\n\\n此操作会直接修改源代码文件！\\n请确保已备份代码。')) {
+                return;
+            }
+            
+            const sourceVersion = document.getElementById('migration-source').value;
+            const targetVersion = document.getElementById('migration-target').value;
+            
+            try {
+                const response = await fetch('/api/migration/auto-fix', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        source_version: sourceVersion, 
+                        target_version: targetVersion,
+                        dry_run: false
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    alert('修复失败: ' + data.error);
+                    return;
+                }
+                
+                showNotification('✅ 自动修复已应用', 'success');
+                
+                // 重新分析
+                analyzeMigration();
+            } catch (error) {
+                alert('修复失败: ' + error.message);
             }
         }
         
@@ -1961,6 +2320,128 @@ def compare():
         diff = upgrade_analyzer.compare_versions()
         
         return jsonify(diff.to_dict())
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+# ==================== 迁移辅助 API ====================
+
+@app.route('/api/migration/analyze', methods=['POST'])
+def migration_analyze():
+    """分析代码并生成升级报告"""
+    global analyzer
+    
+    data = request.get_json() or {}
+    source_version = data.get('source_version', '16.0')
+    target_version = data.get('target_version', '17.0')
+    
+    if not analyzer or not analyzer.modules:
+        return jsonify({'error': '请先扫描模块'})
+    
+    try:
+        # 获取模块路径
+        module_paths = list(set(
+            str(Path(mod.path).parent) 
+            for mod in analyzer.modules.values()
+        ))
+        
+        helper = MigrationHelper(module_paths, source_version, target_version)
+        report = helper.generate_report()
+        
+        return jsonify(report)
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+@app.route('/api/migration/scripts/<module_name>')
+def migration_scripts(module_name):
+    """生成迁移脚本模板"""
+    global analyzer
+    
+    source_version = request.args.get('source_version', '16.0')
+    target_version = request.args.get('target_version', '17.0')
+    
+    if not analyzer or not analyzer.modules:
+        return jsonify({'error': '请先扫描模块'})
+    
+    if module_name not in analyzer.modules:
+        return jsonify({'error': f'模块 {module_name} 不存在'})
+    
+    try:
+        module_path = Path(analyzer.modules[module_name].path).parent
+        helper = MigrationHelper([str(module_path)], source_version, target_version)
+        helper.scan_modules()
+        
+        scripts = helper.generate_migration_scripts(module_name)
+        if scripts:
+            return jsonify(scripts.to_dict())
+        return jsonify({'error': '生成脚本失败'})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+@app.route('/api/migration/scripts/<module_name>/save', methods=['POST'])
+def migration_scripts_save(module_name):
+    """保存迁移脚本到模块目录"""
+    global analyzer
+    
+    data = request.get_json() or {}
+    source_version = data.get('source_version', '16.0')
+    target_version = data.get('target_version', '17.0')
+    
+    if not analyzer or not analyzer.modules:
+        return jsonify({'error': '请先扫描模块'})
+    
+    if module_name not in analyzer.modules:
+        return jsonify({'error': f'模块 {module_name} 不存在'})
+    
+    try:
+        module_path = Path(analyzer.modules[module_name].path).parent
+        helper = MigrationHelper([str(module_path)], source_version, target_version)
+        helper.scan_modules()
+        
+        output_dir = helper.save_migration_scripts(module_name)
+        if output_dir:
+            return jsonify({
+                'success': True,
+                'output_dir': output_dir,
+                'message': f'迁移脚本已保存到 {output_dir}'
+            })
+        return jsonify({'error': '保存失败'})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+@app.route('/api/migration/auto-fix', methods=['POST'])
+def migration_auto_fix():
+    """应用自动修复"""
+    global analyzer
+    
+    data = request.get_json() or {}
+    source_version = data.get('source_version', '16.0')
+    target_version = data.get('target_version', '17.0')
+    dry_run = data.get('dry_run', True)
+    
+    if not analyzer or not analyzer.modules:
+        return jsonify({'error': '请先扫描模块'})
+    
+    try:
+        module_paths = list(set(
+            str(Path(mod.path).parent) 
+            for mod in analyzer.modules.values()
+        ))
+        
+        helper = MigrationHelper(module_paths, source_version, target_version)
+        helper.scan_modules()
+        helper.analyze_code()
+        
+        fixes = helper.apply_auto_fixes(dry_run=dry_run)
+        
+        return jsonify({
+            'dry_run': dry_run,
+            'fixes': fixes,
+            'message': '模拟运行完成' if dry_run else '自动修复已应用'
+        })
     except Exception as e:
         return jsonify({'error': str(e)})
 
