@@ -586,6 +586,14 @@ HTML_TEMPLATE = '''
                     </select>
                 </div>
                 
+                <!-- 已上传分析历史 -->
+                <div class="form-group" id="uploaded-history-group" style="display: none;">
+                    <label>📦 已上传的分析</label>
+                    <select id="uploaded-history" onchange="loadUploadedHistory()" style="width: 100%; padding: 12px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary); margin-bottom: 10px;">
+                        <option value="">-- 选择已上传的分析 --</option>
+                    </select>
+                </div>
+                
                 <!-- 快捷路径按钮 -->
                 <div class="form-group">
                     <label>⚡ 快速操作</label>
@@ -823,6 +831,64 @@ HTML_TEMPLATE = '''
                     });
                 }
             } catch(e) {}
+        }
+        
+        // 加载已上传的分析历史
+        async function loadUploadedHistoryList() {
+            try {
+                const response = await fetch('/api/storage/records');
+                const records = await response.json();
+                const select = document.getElementById('uploaded-history');
+                const group = document.getElementById('uploaded-history-group');
+                
+                if (records.length > 0) {
+                    group.style.display = 'block';
+                    select.innerHTML = '<option value="">-- 选择已上传的分析 --</option>';
+                    records.forEach(record => {
+                        const opt = document.createElement('option');
+                        opt.value = record.id;
+                        opt.textContent = '📦 ' + record.filename + ' (' + record.modules_count + '个模块)';
+                        select.appendChild(opt);
+                    });
+                }
+            } catch(e) {
+                console.error('加载上传历史失败:', e);
+            }
+        }
+        
+        // 选择已上传的分析
+        async function loadUploadedHistory() {
+            const select = document.getElementById('uploaded-history');
+            const recordId = select.value;
+            if (!recordId) return;
+            
+            document.getElementById('scan-loading').classList.add('active');
+            document.getElementById('scan-results').style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/storage/record/' + recordId + '/load', {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                
+                if (data.error) {
+                    alert('加载失败: ' + data.error);
+                    return;
+                }
+                
+                moduleData = {
+                    modules: data.modules,
+                    statistics: data.statistics
+                };
+                displayResults(moduleData);
+                document.getElementById('scan-results').scrollIntoView({ behavior: 'smooth' });
+                showNotification('✅ 已加载历史分析', 'success');
+            } catch (error) {
+                alert('加载失败: ' + error.message);
+            } finally {
+                document.getElementById('scan-loading').classList.remove('active');
+                select.value = '';  // 重置选择
+            }
         }
         
         function savePathHistory(paths) {
@@ -1587,6 +1653,12 @@ HTML_TEMPLATE = '''
             if (e.target.id === 'folder-modal') {
                 closeFolderBrowser();
             }
+        });
+        
+        // 页面加载时初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            loadPathHistory();
+            loadUploadedHistoryList();
         });
     </script>
     
