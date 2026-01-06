@@ -215,3 +215,53 @@
 **状态标签：** ✅完成
 
 ---
+
+## 添加云存储功能
+
+**时间戳：** 2026-01-07 10:00
+
+**对话标题：** 添加云存储支持，实现 ZIP 文件和分析结果持久化
+
+**用户需求：** 
+上传的 ZIP 文件保存到云端，支持完整云存储方案（ZIP 和分析结果都保存，支持重新分析）。
+
+**解决方案：**
+
+### 1. 云存储模块 (`cloud_storage.py`)
+- 抽象存储接口，支持多种后端
+- **Vercel Blob 存储** - 云端部署时使用
+- **本地存储** - 开发/本地使用时使用
+- 自动检测环境并选择合适的存储后端
+
+### 2. 分析历史页面 (`/history`)
+- 拖拽上传 ZIP 文件
+- 自动分析并保存到云端
+- 查看所有历史分析记录
+- 支持重新分析历史 ZIP
+- 支持删除记录
+- 显示存储使用信息
+
+### 3. 新增 API 端点
+- `POST /api/storage/upload` - 上传 ZIP 并分析保存
+- `GET /api/storage/records` - 获取所有分析记录
+- `GET /api/storage/record/<id>` - 获取单个记录
+- `POST /api/storage/record/<id>/load` - 加载历史记录到分析器
+- `DELETE /api/storage/record/<id>` - 删除记录
+- `GET /api/storage/info` - 获取存储信息
+- `POST /api/storage/clear` - 清空存储（仅本地）
+
+### 4. 主页导航更新
+- 添加"📚 分析历史"入口链接
+
+**代码改动：**
+- 新增 `odoo_depends/cloud_storage.py` - 云存储模块
+- 修改 `odoo_depends/web_app.py` - 添加历史页面和 API
+- 修改 `requirements.txt` - 添加 requests 依赖
+
+**访问地址：**
+- 本地: http://localhost:8080/history
+- Vercel: https://odoo-depends.vercel.app/history
+
+**状态标签：** ✅完成
+
+---
