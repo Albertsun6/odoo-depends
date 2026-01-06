@@ -148,6 +148,16 @@ HTML_TEMPLATE = '''
             from { opacity: 0; transform: translateY(10px); }
             to { opacity: 1; transform: translateY(0); }
         }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(100px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        
+        @keyframes slideOut {
+            from { opacity: 1; transform: translateX(0); }
+            to { opacity: 0; transform: translateX(100px); }
+        }
 
         /* 卡片 */
         .card {
@@ -746,6 +756,33 @@ HTML_TEMPLATE = '''
         let moduleData = null;
         let network = null;
         
+        // 显示通知
+        function showNotification(message, type = 'info') {
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                padding: 15px 25px;
+                border-radius: 10px;
+                color: white;
+                font-weight: 500;
+                z-index: 10000;
+                animation: slideIn 0.3s ease;
+                background: ${type === 'success' ? 'linear-gradient(135deg, #2ecc71, #27ae60)' : 
+                             type === 'error' ? 'linear-gradient(135deg, #e74c3c, #c0392b)' :
+                             'linear-gradient(135deg, #3498db, #2980b9)'};
+                box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            `;
+            notification.textContent = message;
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                notification.style.animation = 'slideOut 0.3s ease';
+                setTimeout(() => notification.remove(), 300);
+            }, 3000);
+        }
+        
         function showPage(pageId) {
             document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
             document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -855,6 +892,11 @@ HTML_TEMPLATE = '''
                 
                 moduleData = data;
                 displayResults(data);
+                // 滚动到结果区域
+                document.getElementById('scan-results').scrollIntoView({ behavior: 'smooth' });
+                // 显示成功提示
+                const count = Object.keys(data.modules || {}).length;
+                showNotification('✅ 上传成功！扫描到 ' + count + ' 个模块', 'success');
             } catch (error) {
                 alert('上传失败: ' + error.message);
             } finally {
@@ -931,6 +973,10 @@ HTML_TEMPLATE = '''
                 // 保存成功扫描的路径到历史记录
                 savePathHistory(document.getElementById('paths').value.trim());
                 displayResults(data);
+                // 滚动到结果区域并显示通知
+                document.getElementById('scan-results').scrollIntoView({ behavior: 'smooth' });
+                const count = Object.keys(data.modules || {}).length;
+                showNotification('✅ 扫描完成！发现 ' + count + ' 个模块', 'success');
             } catch (error) {
                 alert('请求失败: ' + error.message);
             } finally {
