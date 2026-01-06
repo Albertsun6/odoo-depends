@@ -1486,9 +1486,25 @@ HTML_TEMPLATE = '''
         let currentBrowsePath = '';
         
         async function openFolderBrowser() {
-            document.getElementById('folder-modal').style.display = 'flex';
-            // 加载初始目录
-            await browseTo('~');
+            // 先检测是否是本地环境
+            try {
+                const response = await fetch('/api/browse?path=~');
+                const data = await response.json();
+                
+                if (data.error) {
+                    // 可能是 Vercel 环境，无法访问本地文件
+                    alert('⚠️ 云端部署版本无法浏览本地文件夹\\n\\n请使用以下方式：\\n1. 点击「上传 ZIP」上传模块压缩包\\n2. 或使用本地部署版本（python run.py）');
+                    return;
+                }
+                
+                document.getElementById('folder-modal').style.display = 'flex';
+                document.getElementById('current-path').textContent = data.path;
+                document.getElementById('current-path-input').value = data.path;
+                currentBrowsePath = data.path;
+                await renderFolderList(data);
+            } catch (error) {
+                alert('无法连接服务器：' + error.message);
+            }
         }
         
         function closeFolderBrowser() {
@@ -1511,32 +1527,36 @@ HTML_TEMPLATE = '''
                 currentBrowsePath = data.path;
                 document.getElementById('current-path').textContent = data.path;
                 document.getElementById('current-path-input').value = data.path;
-                
-                let html = '';
-                
-                // 返回上级目录
-                if (data.parent) {
-                    html += '<div class="folder-item" onclick="browseTo(\\'' + data.parent.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'") + '\\')"><span class="folder-icon">⬆️</span><span class="folder-name">..</span><span class="folder-type">返回上级</span></div>';
-                }
-                
-                // 目录和模块
-                for (const item of data.items) {
-                    if (item.is_dir) {
-                        const escapedPath = item.path.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
-                        const icon = item.is_odoo_module ? '📦' : '📁';
-                        const typeLabel = item.is_odoo_module ? '<span style="color:var(--accent-green);">Odoo模块</span>' : '文件夹';
-                        html += '<div class="folder-item' + (item.is_odoo_module ? ' odoo-module' : '') + '" onclick="browseTo(\\'' + escapedPath + '\\')" ondblclick="selectAndClose(\\'' + escapedPath + '\\')"><span class="folder-icon">' + icon + '</span><span class="folder-name">' + item.name + '</span><span class="folder-type">' + typeLabel + '</span>' + (item.is_odoo_module ? '<button class="btn btn-sm" onclick="event.stopPropagation();selectFolder(\\'' + escapedPath + '\\')">选择</button>' : '') + '</div>';
-                    }
-                }
-                
-                if (!html) {
-                    html = '<div style="text-align:center;padding:40px;color:var(--text-secondary);">📭 此目录为空</div>';
-                }
-                
-                listEl.innerHTML = html;
+                await renderFolderList(data);
             } catch (error) {
-                listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--accent-red);">❌ 加载失败: ' + error.message + '</div>';
+                listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--accent-red);">❌ 请求失败: ' + error.message + '</div>';
             }
+        }
+        
+        function renderFolderList(data) {
+            const listEl = document.getElementById('folder-list');
+            let html = '';
+            
+            // 返回上级目录
+            if (data.parent) {
+                html += '<div class="folder-item" onclick="browseTo(\\'' + data.parent.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'") + '\\')"><span class="folder-icon">⬆️</span><span class="folder-name">..</span><span class="folder-type">返回上级</span></div>';
+            }
+            
+            // 目录和模块
+            for (const item of data.items || []) {
+                if (item.is_dir) {
+                    const escapedPath = item.path.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
+                    const icon = item.is_odoo_module ? '📦' : '📁';
+                    const typeLabel = item.is_odoo_module ? '<span style="color:var(--accent-green);">Odoo模块</span>' : '文件夹';
+                    html += '<div class="folder-item' + (item.is_odoo_module ? ' odoo-module' : '') + '" onclick="browseTo(\\'' + escapedPath + '\\')" ondblclick="selectAndClose(\\'' + escapedPath + '\\')"><span class="folder-icon">' + icon + '</span><span class="folder-name">' + item.name + '</span><span class="folder-type">' + typeLabel + '</span>' + (item.is_odoo_module ? '<button class="btn btn-sm" onclick="event.stopPropagation();selectFolder(\\'' + escapedPath + '\\')">选择</button>' : '') + '</div>';
+                }
+            }
+            
+            if (!html) {
+                html = '<div style="text-align:center;padding:40px;color:var(--text-secondary);">📭 此目录为空</div>';
+            }
+            
+            listEl.innerHTML = html;
         }
         
         function selectFolder(path) {
