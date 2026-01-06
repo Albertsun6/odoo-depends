@@ -539,9 +539,13 @@ HTML_TEMPLATE = '''
             <div class="nav-item" onclick="showPage('compare')">
                 <span class="icon">🔄</span> 版本对比
             </div>
-            <a href="/history" class="nav-item" style="text-decoration:none;color:inherit;">
+        </div>
+        
+        <div class="nav-section">
+            <div class="nav-section-title">存储</div>
+            <div class="nav-item" onclick="window.location.href='/history'">
                 <span class="icon">📚</span> 分析历史
-            </a>
+            </div>
         </div>
         
         <div class="nav-section">
@@ -605,6 +609,7 @@ HTML_TEMPLATE = '''
                 <div class="card">
                     <div class="card-header">
                         <h2 class="card-title">统计概览</h2>
+                        <button class="btn btn-primary" onclick="saveToHistory()">💾 保存到历史</button>
                     </div>
                     <div class="stats-grid" id="stats-grid"></div>
                 </div>
@@ -1127,6 +1132,34 @@ HTML_TEMPLATE = '''
                 return;
             }
             window.open(`/api/export/${format}`, '_blank');
+        }
+        
+        // ========== 保存到历史 ==========
+        async function saveToHistory() {
+            if (!moduleData) {
+                alert('请先扫描模块');
+                return;
+            }
+            
+            const name = prompt('请输入保存名称（可选）:', '分析结果 ' + new Date().toLocaleString());
+            if (name === null) return;
+            
+            try {
+                const response = await fetch('/api/storage/save-current', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name || '未命名分析' })
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    alert('保存失败: ' + data.error);
+                } else {
+                    alert('已保存到历史！ID: ' + data.record_id);
+                }
+            } catch (error) {
+                alert('保存失败: ' + error.message);
+            }
         }
         
         // ========== 模型分析 ==========
@@ -2042,6 +2075,48 @@ def storage_info():
             'available': storage.is_available
         }
     return jsonify(info)
+
+
+@app.route('/api/storage/save-current', methods=['POST'])
+def storage_save_current():
+    """保存当前分析结果到历史"""
+    global analyzer
+    
+    if not analyzer or not analyzer.modules:
+        return jsonify({'error': '没有可保存的分析结果，请先扫描模块'})
+    
+    data = request.get_json() or {}
+    name = data.get('name', '未命名分析')
+    
+    try:
+        record_id = generate_record_id()
+        
+        # 创建分析结果
+        analysis_result = {
+            'modules': {name: mod.to_dict() for name, mod in analyzer.modules.items()},
+            'statistics': analyzer.get_statistics()
+        }
+        
+        # 保存记录（不保存 ZIP，只保存分析结果）
+        record = AnalysisRecord(
+            id=record_id,
+            filename=name,
+            upload_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            file_url=None,  # 没有 ZIP 文件
+            file_size=0,
+            modules_count=len(analyzer.modules),
+            analysis_result=analysis_result
+        )
+        storage.save_record(record)
+        
+        return jsonify({
+            'success': True,
+            'record_id': record_id,
+            'message': f'已保存，ID: {record_id}'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': f'保存失败: {str(e)}'})
 
 
 @app.route('/api/storage/clear', methods=['POST'])
