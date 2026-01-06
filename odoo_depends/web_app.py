@@ -718,10 +718,19 @@ HTML_TEMPLATE = '''
                     <h2 class="card-title">数据模型分析</h2>
                     <button class="btn btn-primary" onclick="analyzeModels()">🔍 分析模型</button>
                 </div>
-                <div id="model-stats" style="margin-bottom: 20px;"></div>
-                <div class="search-box">
-                    <input type="text" id="model-search" placeholder="搜索模型..." oninput="filterModelsTable()">
+                <div style="display: flex; gap: 15px; margin-bottom: 20px; flex-wrap: wrap;">
+                    <div class="form-group" style="flex: 1; min-width: 200px; margin: 0;">
+                        <label style="font-size: 0.85rem; margin-bottom: 5px; display: block;">选择模块</label>
+                        <select id="model-module-select" style="width: 100%; padding: 10px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary);" onchange="filterModelsByModule()">
+                            <option value="">全部模块</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="flex: 2; min-width: 300px; margin: 0;">
+                        <label style="font-size: 0.85rem; margin-bottom: 5px; display: block;">搜索模型</label>
+                        <input type="text" id="model-search" placeholder="搜索模型名称..." style="width: 100%; padding: 10px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary);" oninput="filterModelsTable()">
+                    </div>
                 </div>
+                <div id="model-stats" style="margin-bottom: 20px;"></div>
                 <div class="module-list" id="models-list" style="max-height: 600px;"></div>
             </div>
         </div>
@@ -1654,37 +1663,61 @@ HTML_TEMPLATE = '''
                     </div>
                 `;
                 
+                // 填充模块选择框
+                const moduleSelect = document.getElementById('model-module-select');
+                const modules = [...new Set(Object.values(data.models).map(m => m.module))].sort();
+                moduleSelect.innerHTML = '<option value="">全部模块</option>' + 
+                    modules.map(m => `<option value="${m}">${m}</option>`).join('');
+                
                 // 显示模型列表
-                let html = '';
-                const models = Object.entries(data.models).sort((a, b) => a[0].localeCompare(b[0]));
-                for (const [name, model] of models) {
-                    const fieldCount = Object.keys(model.fields || {}).length;
-                    html += `
-                        <div class="module-item" data-name="${name.toLowerCase()}" onclick="showModelDetail('${name}')">
-                            <div>
-                                <span class="module-name">${name}</span>
-                                <span style="color: var(--text-secondary); margin-left: 10px;">${model.module}</span>
-                            </div>
-                            <div class="module-info">
-                                <span>${fieldCount} 字段</span>
-                                <span>${model.methods?.length || 0} 方法</span>
-                            </div>
-                        </div>
-                    `;
-                }
-                document.getElementById('models-list').innerHTML = html || '<div class="empty-state"><p>未找到模型定义</p></div>';
+                renderModelsList(data.models);
                 
                 // 保存数据供后续使用
                 window.modelsData = data.models;
+                showNotification('✅ 模型分析完成', 'success');
             } catch (error) {
                 alert('分析模型失败: ' + error.message);
             }
         }
         
+        function renderModelsList(models, moduleFilter = '', searchFilter = '') {
+            let html = '';
+            const modelEntries = Object.entries(models).sort((a, b) => a[0].localeCompare(b[0]));
+            
+            for (const [name, model] of modelEntries) {
+                // 应用过滤
+                if (moduleFilter && model.module !== moduleFilter) continue;
+                if (searchFilter && !name.toLowerCase().includes(searchFilter)) continue;
+                
+                const fieldCount = Object.keys(model.fields || {}).length;
+                html += `
+                    <div class="module-item" data-name="${name.toLowerCase()}" data-module="${model.module}" onclick="showModelDetail('${name}')">
+                        <div>
+                            <span class="module-name">${name}</span>
+                            <span style="color: var(--text-secondary); margin-left: 10px;">📦 ${model.module}</span>
+                        </div>
+                        <div class="module-info">
+                            <span>${fieldCount} 字段</span>
+                            <span>${model.methods?.length || 0} 方法</span>
+                        </div>
+                    </div>
+                `;
+            }
+            document.getElementById('models-list').innerHTML = html || '<div style="text-align:center;padding:40px;color:var(--text-secondary);">📭 未找到匹配的模型</div>';
+        }
+        
+        function filterModelsByModule() {
+            if (!window.modelsData) return;
+            const moduleFilter = document.getElementById('model-module-select').value;
+            const searchFilter = document.getElementById('model-search').value.toLowerCase();
+            renderModelsList(window.modelsData, moduleFilter, searchFilter);
+        }
+        
         function filterModelsTable() {
+            if (!window.modelsData) return;
+            const moduleFilter = document.getElementById('model-module-select').value;
             const search = document.getElementById('model-search').value.toLowerCase();
-            document.querySelectorAll('#models-list .module-item').forEach(item => {
-                item.style.display = item.dataset.name.includes(search) ? 'flex' : 'none';
+            renderModelsList(window.modelsData, moduleFilter, search);
             });
         }
         
