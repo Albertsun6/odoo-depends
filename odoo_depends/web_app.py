@@ -11,6 +11,8 @@ from flask import Flask, render_template_string, request, jsonify, send_file
 from .analyzer import OdooModuleAnalyzer
 from .visualizer import DependencyVisualizer
 from .upgrade_analyzer import UpgradeAnalyzer, ModelAnalyzer
+from .cloud_storage import get_storage, LocalStorage, AnalysisRecord, generate_record_id
+from datetime import datetime
 
 
 app = Flask(__name__)
@@ -21,6 +23,7 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max
 analyzer = None
 visualizer = None
 upgrade_analyzer = UpgradeAnalyzer()
+storage = get_storage()  # 云存储/本地存储实例
 
 
 HTML_TEMPLATE = '''
@@ -536,6 +539,9 @@ HTML_TEMPLATE = '''
             <div class="nav-item" onclick="showPage('compare')">
                 <span class="icon">🔄</span> 版本对比
             </div>
+            <a href="/history" class="nav-item" style="text-decoration:none;color:inherit;">
+                <span class="icon">📚</span> 分析历史
+            </a>
         </div>
         
         <div class="nav-section">
@@ -1858,6 +1864,664 @@ def get_quick_paths():
     
     # 只返回存在的路径
     return jsonify([p for p in paths if os.path.exists(p['path'])])
+
+
+# ==================== 云存储 API ====================
+
+@app.route('/api/storage/upload', methods=['POST'])
+def storage_upload():
+    """上传 ZIP 文件并保存到云存储，同时进行分析"""
+    global analyzer, visualizer
+    import zipfile
+    import shutil
+    
+    if 'file' not in request.files:
+        return jsonify({'error': '请上传文件'})
+    
+    file = request.files['file']
+    if not file.filename:
+        return jsonify({'error': '请选择文件'})
+    
+    if not file.filename.endswith('.zip'):
+        return jsonify({'error': '请上传 ZIP 文件'})
+    
+    try:
+        # 读取文件内容
+        file_data = file.read()
+        file_size = len(file_data)
+        
+        # 上传到云存储
+        record_id = generate_record_id()
+        file_url = storage.upload_file(f"modules/{record_id}_{file.filename}", file_data)
+        
+        # 解压并分析
+        temp_dir = tempfile.mkdtemp()
+        zip_path = os.path.join(temp_dir, 'modules.zip')
+        
+        with open(zip_path, 'wb') as f:
+            f.write(file_data)
+        
+        extract_dir = os.path.join(temp_dir, 'extracted')
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
+        
+        # 分析模块
+        analyzer = OdooModuleAnalyzer([extract_dir])
+        analyzer.scan_modules()
+        analyzer.build_dependency_graph()
+        visualizer = DependencyVisualizer(analyzer)
+        
+        # 创建分析结果
+        analysis_result = {
+            'modules': {name: mod.to_dict() for name, mod in analyzer.modules.items()},
+            'statistics': analyzer.get_statistics()
+        }
+        
+        # 保存记录
+        record = AnalysisRecord(
+            id=record_id,
+            filename=file.filename,
+            upload_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            file_url=file_url,
+            file_size=file_size,
+            modules_count=len(analyzer.modules),
+            analysis_result=analysis_result
+        )
+        storage.save_record(record)
+        
+        # 清理临时文件
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        return jsonify({
+            'success': True,
+            'record_id': record_id,
+            'modules': analysis_result['modules'],
+            'statistics': analysis_result['statistics'],
+            'message': f'已保存到云端，ID: {record_id}'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': f'处理失败: {str(e)}'})
+
+
+@app.route('/api/storage/records')
+def storage_records():
+    """获取所有分析记录"""
+    records = storage.get_records()
+    return jsonify([r.to_dict() for r in records])
+
+
+@app.route('/api/storage/record/<record_id>')
+def storage_record(record_id):
+    """获取单个分析记录"""
+    record = storage.get_record(record_id)
+    if record:
+        return jsonify(record.to_dict())
+    return jsonify({'error': '记录不存在'}), 404
+
+
+@app.route('/api/storage/record/<record_id>/load', methods=['POST'])
+def storage_load_record(record_id):
+    """加载历史分析记录到当前分析器"""
+    global analyzer, visualizer
+    
+    record = storage.get_record(record_id)
+    if not record:
+        return jsonify({'error': '记录不存在'}), 404
+    
+    # 如果需要重新分析（有 ZIP 文件）
+    if record.file_url and request.args.get('reanalyze'):
+        try:
+            import zipfile
+            import shutil
+            
+            # 下载 ZIP 文件
+            file_data = storage.download_file(record.file_url)
+            
+            # 解压并分析
+            temp_dir = tempfile.mkdtemp()
+            zip_path = os.path.join(temp_dir, 'modules.zip')
+            
+            with open(zip_path, 'wb') as f:
+                f.write(file_data)
+            
+            extract_dir = os.path.join(temp_dir, 'extracted')
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            
+            # 重新分析
+            analyzer = OdooModuleAnalyzer([extract_dir])
+            analyzer.scan_modules()
+            analyzer.build_dependency_graph()
+            visualizer = DependencyVisualizer(analyzer)
+            
+            # 更新记录
+            record.analysis_result = {
+                'modules': {name: mod.to_dict() for name, mod in analyzer.modules.items()},
+                'statistics': analyzer.get_statistics()
+            }
+            record.modules_count = len(analyzer.modules)
+            storage.save_record(record)
+            
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            
+            return jsonify({
+                'success': True,
+                'modules': record.analysis_result['modules'],
+                'statistics': record.analysis_result['statistics']
+            })
+            
+        except Exception as e:
+            return jsonify({'error': f'重新分析失败: {str(e)}'})
+    
+    # 直接使用保存的分析结果
+    return jsonify({
+        'success': True,
+        'modules': record.analysis_result.get('modules', {}),
+        'statistics': record.analysis_result.get('statistics', {})
+    })
+
+
+@app.route('/api/storage/record/<record_id>', methods=['DELETE'])
+def storage_delete_record(record_id):
+    """删除分析记录"""
+    if storage.delete_record(record_id):
+        return jsonify({'success': True})
+    return jsonify({'error': '删除失败'}), 400
+
+
+@app.route('/api/storage/info')
+def storage_info():
+    """获取存储信息"""
+    if isinstance(storage, LocalStorage):
+        info = storage.get_storage_info()
+        info['type'] = 'local'
+    else:
+        info = {
+            'type': 'vercel_blob',
+            'available': storage.is_available
+        }
+    return jsonify(info)
+
+
+@app.route('/api/storage/clear', methods=['POST'])
+def storage_clear():
+    """清空存储（仅本地存储支持）"""
+    if isinstance(storage, LocalStorage):
+        if storage.clear_storage():
+            return jsonify({'success': True})
+    return jsonify({'error': '清空失败'}), 400
+
+
+@app.route('/history')
+def history_page():
+    """分析历史页面"""
+    return render_template_string(HISTORY_TEMPLATE)
+
+
+HISTORY_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>分析历史 - Odoo 模块依赖分析器</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0f0f1a;
+            --bg-secondary: #1a1a2e;
+            --bg-card: rgba(26, 26, 46, 0.9);
+            --accent-cyan: #00d4ff;
+            --accent-green: #2ecc71;
+            --accent-red: #e74c3c;
+            --accent-orange: #f39c12;
+            --text-primary: #ffffff;
+            --text-secondary: rgba(255, 255, 255, 0.7);
+        }
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Noto Sans SC', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+        
+        h1 {
+            font-size: 1.8rem;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-green));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .btn {
+            padding: 0.6rem 1.2rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-cyan), #0099cc);
+            color: white;
+        }
+        
+        .btn-primary:hover { transform: translateY(-2px); }
+        
+        .btn-danger {
+            background: var(--accent-red);
+            color: white;
+        }
+        
+        .btn-secondary {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .storage-info {
+            background: var(--bg-card);
+            padding: 1rem 1.5rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .storage-info span {
+            color: var(--text-secondary);
+        }
+        
+        .storage-info strong {
+            color: var(--accent-cyan);
+        }
+        
+        .records-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 1.5rem;
+        }
+        
+        .record-card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid rgba(255,255,255,0.05);
+            transition: all 0.3s;
+        }
+        
+        .record-card:hover {
+            transform: translateY(-3px);
+            border-color: var(--accent-cyan);
+        }
+        
+        .record-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+        }
+        
+        .record-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--accent-cyan);
+            word-break: break-all;
+        }
+        
+        .record-id {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            background: rgba(255,255,255,0.1);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+        }
+        
+        .record-meta {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        
+        .record-meta span {
+            display: flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+        
+        .record-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .record-actions .btn {
+            flex: 1;
+            padding: 0.5rem;
+            font-size: 0.85rem;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 4rem 2rem;
+            color: var(--text-secondary);
+        }
+        
+        .empty-state h2 {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .upload-zone {
+            border: 2px dashed rgba(255,255,255,0.2);
+            border-radius: 12px;
+            padding: 3rem;
+            text-align: center;
+            margin-bottom: 2rem;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+        
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: var(--accent-cyan);
+            background: rgba(0, 212, 255, 0.05);
+        }
+        
+        .upload-zone input {
+            display: none;
+        }
+        
+        .upload-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 2rem;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: var(--accent-cyan);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 分析历史</h1>
+            <div>
+                <a href="/" class="btn btn-secondary">← 返回主页</a>
+            </div>
+        </header>
+        
+        <div class="upload-zone" id="uploadZone">
+            <input type="file" id="fileInput" accept=".zip">
+            <div class="upload-icon">📦</div>
+            <p>拖拽 ZIP 文件到这里，或点击上传</p>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.5rem;">
+                上传后自动分析并保存到云端
+            </p>
+        </div>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>正在上传并分析...</p>
+        </div>
+        
+        <div class="storage-info" id="storageInfo">
+            <span>存储信息加载中...</span>
+        </div>
+        
+        <div class="records-grid" id="recordsGrid">
+            <div class="empty-state">
+                <h2>暂无分析记录</h2>
+                <p>上传 ZIP 文件开始分析</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const loading = document.getElementById('loading');
+        const recordsGrid = document.getElementById('recordsGrid');
+        
+        // 上传区域事件
+        uploadZone.addEventListener('click', () => fileInput.click());
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) uploadFile(files[0]);
+        });
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) uploadFile(fileInput.files[0]);
+        });
+        
+        // 上传文件
+        async function uploadFile(file) {
+            if (!file.name.endsWith('.zip')) {
+                alert('请上传 ZIP 文件');
+                return;
+            }
+            
+            loading.style.display = 'block';
+            uploadZone.style.display = 'none';
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                const resp = await fetch('/api/storage/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await resp.json();
+                
+                if (data.error) {
+                    alert('上传失败: ' + data.error);
+                } else {
+                    alert('上传成功！已保存到云端，ID: ' + data.record_id);
+                    loadRecords();
+                }
+            } catch (e) {
+                alert('上传失败: ' + e.message);
+            } finally {
+                loading.style.display = 'none';
+                uploadZone.style.display = 'block';
+            }
+        }
+        
+        // 加载记录列表
+        async function loadRecords() {
+            try {
+                const resp = await fetch('/api/storage/records');
+                const records = await resp.json();
+                
+                if (records.length === 0) {
+                    recordsGrid.innerHTML = `
+                        <div class="empty-state">
+                            <h2>暂无分析记录</h2>
+                            <p>上传 ZIP 文件开始分析</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                recordsGrid.innerHTML = records.map(r => `
+                    <div class="record-card">
+                        <div class="record-header">
+                            <div class="record-title">${r.filename}</div>
+                            <span class="record-id">#${r.id}</span>
+                        </div>
+                        <div class="record-meta">
+                            <span>📅 ${r.upload_time}</span>
+                            <span>📦 ${r.modules_count} 个模块</span>
+                            <span>💾 ${(r.file_size / 1024).toFixed(1)} KB</span>
+                        </div>
+                        <div class="record-actions">
+                            <button class="btn btn-primary" onclick="loadRecord('${r.id}')">
+                                📊 查看分析
+                            </button>
+                            <button class="btn btn-secondary" onclick="reanalyze('${r.id}')">
+                                🔄 重新分析
+                            </button>
+                            <button class="btn btn-danger" onclick="deleteRecord('${r.id}')">
+                                🗑️
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error('加载记录失败:', e);
+            }
+        }
+        
+        // 加载存储信息
+        async function loadStorageInfo() {
+            try {
+                const resp = await fetch('/api/storage/info');
+                const info = await resp.json();
+                
+                const storageInfo = document.getElementById('storageInfo');
+                if (info.type === 'local') {
+                    storageInfo.innerHTML = `
+                        <span>本地存储: <strong>${info.total_size_mb} MB</strong> 使用</span>
+                        <span>${info.file_count} 个文件 | ${info.record_count} 条记录</span>
+                        <button class="btn btn-danger" onclick="clearStorage()">清空存储</button>
+                    `;
+                } else {
+                    storageInfo.innerHTML = `
+                        <span>云存储: <strong>Vercel Blob</strong></span>
+                        <span>状态: ${info.available ? '✅ 已连接' : '❌ 未配置'}</span>
+                    `;
+                }
+            } catch (e) {
+                console.error('加载存储信息失败:', e);
+            }
+        }
+        
+        // 加载分析记录
+        async function loadRecord(id) {
+            try {
+                const resp = await fetch(`/api/storage/record/${id}/load`, { method: 'POST' });
+                const data = await resp.json();
+                
+                if (data.error) {
+                    alert('加载失败: ' + data.error);
+                } else {
+                    // 跳转到主页查看分析结果
+                    window.location.href = '/?loaded=' + id;
+                }
+            } catch (e) {
+                alert('加载失败: ' + e.message);
+            }
+        }
+        
+        // 重新分析
+        async function reanalyze(id) {
+            if (!confirm('确定要重新分析吗？')) return;
+            
+            try {
+                const resp = await fetch(`/api/storage/record/${id}/load?reanalyze=1`, { method: 'POST' });
+                const data = await resp.json();
+                
+                if (data.error) {
+                    alert('分析失败: ' + data.error);
+                } else {
+                    alert('重新分析完成！');
+                    window.location.href = '/?loaded=' + id;
+                }
+            } catch (e) {
+                alert('分析失败: ' + e.message);
+            }
+        }
+        
+        // 删除记录
+        async function deleteRecord(id) {
+            if (!confirm('确定要删除此记录吗？')) return;
+            
+            try {
+                const resp = await fetch(`/api/storage/record/${id}`, { method: 'DELETE' });
+                const data = await resp.json();
+                
+                if (data.error) {
+                    alert('删除失败: ' + data.error);
+                } else {
+                    loadRecords();
+                }
+            } catch (e) {
+                alert('删除失败: ' + e.message);
+            }
+        }
+        
+        // 清空存储
+        async function clearStorage() {
+            if (!confirm('确定要清空所有存储吗？此操作不可恢复！')) return;
+            
+            try {
+                const resp = await fetch('/api/storage/clear', { method: 'POST' });
+                const data = await resp.json();
+                
+                if (data.error) {
+                    alert('清空失败: ' + data.error);
+                } else {
+                    alert('存储已清空');
+                    loadRecords();
+                    loadStorageInfo();
+                }
+            } catch (e) {
+                alert('清空失败: ' + e.message);
+            }
+        }
+        
+        // 初始化
+        loadStorageInfo();
+        loadRecords();
+    </script>
+</body>
+</html>
+'''
 
 
 def run_server(host='0.0.0.0', port=5000, debug=False):
