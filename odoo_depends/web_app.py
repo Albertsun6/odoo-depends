@@ -1747,6 +1747,19 @@ HTML_TEMPLATE = '''
                 const response = await fetch(`/api/impact/${moduleName}`);
                 const data = await response.json();
                 
+                // 检查错误
+                if (data.error) {
+                    alert('评估失败: ' + data.error);
+                    return;
+                }
+                
+                // 安全获取数组长度
+                const directDeps = data.direct_dependents || [];
+                const allDeps = data.all_dependents || [];
+                const models = data.affected_models || [];
+                const riskFactors = data.risk_factors || [];
+                const suggestions = data.suggestions || [];
+                
                 const riskColors = {
                     'low': 'var(--accent-green)',
                     'medium': 'var(--accent-orange)',
@@ -1760,24 +1773,27 @@ HTML_TEMPLATE = '''
                     'critical': '极高风险'
                 };
                 
+                const riskLevel = data.risk_level || 'low';
+                const impactScore = data.impact_score || 0;
+                
                 document.getElementById('impact-result').innerHTML = `
                     <div class="card" style="margin-top: 20px;">
-                        <h3 style="color: ${riskColors[data.risk_level]}; font-size: 1.5rem; margin-bottom: 20px;">
-                            ⚡ ${riskLabels[data.risk_level]}
+                        <h3 style="color: ${riskColors[riskLevel]}; font-size: 1.5rem; margin-bottom: 20px;">
+                            ⚡ ${riskLabels[riskLevel]}
                         </h3>
                         
                         <div class="stats-grid" style="margin-bottom: 20px;">
-                            <div class="stat-card"><div class="stat-value blue">${data.direct_dependents.length}</div><div class="stat-label">直接依赖</div></div>
-                            <div class="stat-card"><div class="stat-value purple">${data.all_dependents.length}</div><div class="stat-label">全部依赖</div></div>
-                            <div class="stat-card"><div class="stat-value green">${data.affected_models.length}</div><div class="stat-label">受影响模型</div></div>
-                            <div class="stat-card"><div class="stat-value orange">${data.impact_score}</div><div class="stat-label">影响分数</div></div>
+                            <div class="stat-card"><div class="stat-value blue">${directDeps.length}</div><div class="stat-label">直接依赖</div></div>
+                            <div class="stat-card"><div class="stat-value purple">${allDeps.length}</div><div class="stat-label">全部依赖</div></div>
+                            <div class="stat-card"><div class="stat-value green">${models.length}</div><div class="stat-label">受影响模型</div></div>
+                            <div class="stat-card"><div class="stat-value orange">${impactScore}</div><div class="stat-label">影响分数</div></div>
                         </div>
                         
-                        ${data.risk_factors.length ? `
+                        ${riskFactors.length ? `
                         <div style="margin-bottom: 15px;">
                             <strong>风险因素:</strong>
                             <ul style="margin-top: 8px; padding-left: 20px;">
-                                ${data.risk_factors.map(f => `<li style="margin: 5px 0;">${f}</li>`).join('')}
+                                ${riskFactors.map(f => `<li style="margin: 5px 0;">${f}</li>`).join('')}
                             </ul>
                         </div>
                         ` : ''}
@@ -1785,7 +1801,7 @@ HTML_TEMPLATE = '''
                         <div style="margin-bottom: 15px;">
                             <strong>建议:</strong>
                             <ul style="margin-top: 8px; padding-left: 20px;">
-                                ${data.recommendations.map(r => `<li style="margin: 5px 0;">${r}</li>`).join('')}
+                                ${(data.recommendations || []).map(r => `<li style="margin: 5px 0;">${r}</li>`).join('')}
                             </ul>
                         </div>
                         
