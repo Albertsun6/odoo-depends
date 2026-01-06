@@ -166,9 +166,10 @@ class LocalStorage(CloudStorage):
     
     def upload_file(self, filename: str, data: bytes) -> str:
         """保存文件到本地"""
-        # 生成唯一文件名
+        # 生成唯一文件名，只取文件名部分（去除路径）
+        base_filename = os.path.basename(filename)
         file_hash = hashlib.md5(data).hexdigest()[:8]
-        safe_filename = f"{file_hash}_{filename}"
+        safe_filename = f"{file_hash}_{base_filename}"
         file_path = self.files_path / safe_filename
         
         with open(file_path, 'wb') as f:
